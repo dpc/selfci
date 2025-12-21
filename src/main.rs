@@ -49,7 +49,7 @@ fn main_inner() -> Result<(), MainError> {
             println!("Edit this file to configure your CI command.");
         }
         Commands::Check { root, base, candidate, print_output, jobs } => {
-            cmd::check::check(root, base, candidate, print_output, jobs)?;
+            cmd::check::check(root, base, candidate, print_output, jobs, cli.vcs.as_deref())?;
         }
         Commands::Report { report_command } => {
             match report_command {

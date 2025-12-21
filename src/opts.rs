@@ -4,6 +4,10 @@ use clap::{Parser, Subcommand};
 #[command(name = "selfci")]
 #[command(about = "A minimalistic local-first unix-philosophy-abiding CI", long_about = None)]
 pub struct Cli {
+    /// Force VCS type (jj or git)
+    #[arg(long, global = true, env = "SELFCI_VCS_FORCE", value_name = "VCS")]
+    pub vcs: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

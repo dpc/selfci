@@ -1,4 +1,5 @@
 pub mod config;
+pub mod exit_codes;
 pub mod protocol;
 
 use duct::cmd;
@@ -9,8 +10,10 @@ pub use config::{init_config, read_config, SelfCIConfig};
 
 error_set! {
     VCSError := {
-        #[display("No supported VCS found (looking for .jj directory)")]
+        #[display("No supported VCS found (looking for .jj or .git directory)")]
         NoVCSFound,
+        #[display("Invalid VCS type (must be 'jj' or 'git')")]
+        InvalidVCSType,
     }
 
     WorkDirError := {
@@ -43,20 +46,30 @@ error_set! {
 impl MainError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            MainError::NoVCSFound => 1,
-            MainError::CreateFailed(_) => 2,
-            MainError::CommandFailed(_) => 3,
-            MainError::NotInitialized => 4,
-            MainError::ReadFailed(_) => 5,
-            MainError::ParseFailed(_) => 6,
-            MainError::CheckFailed => 7,
+            MainError::NoVCSFound => exit_codes::EXIT_NO_VCS_FOUND,
+            MainError::InvalidVCSType => exit_codes::EXIT_INVALID_VCS_TYPE,
+            MainError::CreateFailed(_) => exit_codes::EXIT_WORKDIR_CREATE_FAILED,
+            MainError::CommandFailed(_) => exit_codes::EXIT_VCS_COMMAND_FAILED,
+            MainError::NotInitialized => exit_codes::EXIT_NOT_INITIALIZED,
+            MainError::ReadFailed(_) => exit_codes::EXIT_CONFIG_READ_FAILED,
+            MainError::ParseFailed(_) => exit_codes::EXIT_CONFIG_PARSE_FAILED,
+            MainError::CheckFailed => exit_codes::EXIT_CHECK_FAILED,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum VCS {
     Jujutsu,
+    Git,
+}
+
+pub fn parse_vcs(vcs_str: &str) -> Result<VCS, VCSError> {
+    match vcs_str.to_lowercase().as_str() {
+        "jj" | "jujutsu" => Ok(VCS::Jujutsu),
+        "git" => Ok(VCS::Git),
+        _ => Err(VCSError::InvalidVCSType),
+    }
 }
 
 pub fn detect_vcs(root: &Path) -> Result<VCS, VCSError> {
@@ -65,7 +78,20 @@ pub fn detect_vcs(root: &Path) -> Result<VCS, VCSError> {
         return Ok(VCS::Jujutsu);
     }
 
+    let git_path = root.join(".git");
+    if git_path.exists() {
+        return Ok(VCS::Git);
+    }
+
     Err(VCSError::NoVCSFound)
+}
+
+pub fn get_vcs(root: &Path, forced_vcs: Option<&str>) -> Result<VCS, VCSError> {
+    if let Some(vcs_str) = forced_vcs {
+        parse_vcs(vcs_str)
+    } else {
+        detect_vcs(root)
+    }
 }
 
 pub fn copy_revisions_to_workdirs(
@@ -92,17 +118,26 @@ pub fn copy_revisions_to_workdirs(
             let git_dir = git_dir.trim();
 
             // Copy base revision
-            copy_revision_to_workdir(root_dir, base_workdir, base_revision, git_dir)?;
+            copy_revision_to_workdir_jj(root_dir, base_workdir, base_revision, git_dir)?;
 
             // Copy candidate revision
-            copy_revision_to_workdir(root_dir, candidate_workdir, candidate_revision, git_dir)?;
+            copy_revision_to_workdir_jj(root_dir, candidate_workdir, candidate_revision, git_dir)?;
+
+            Ok(())
+        }
+        VCS::Git => {
+            // Copy base revision
+            copy_revision_to_workdir_git(root_dir, base_workdir, base_revision)?;
+
+            // Copy candidate revision
+            copy_revision_to_workdir_git(root_dir, candidate_workdir, candidate_revision)?;
 
             Ok(())
         }
     }
 }
 
-fn copy_revision_to_workdir(
+fn copy_revision_to_workdir_jj(
     root_dir: &Path,
     workdir: &Path,
     revision: &str,
@@ -130,6 +165,21 @@ fn copy_revision_to_workdir(
     // Use git archive to export the revision and pipe to tar for extraction
     cmd!("git", "archive", "--format=tar", &bookmark_name)
         .env("GIT_DIR", git_dir)
+        .pipe(cmd!("tar", "x").dir(workdir))
+        .run()
+        .map_err(VCSOperationError::CommandFailed)?;
+
+    Ok(())
+}
+
+fn copy_revision_to_workdir_git(
+    root_dir: &Path,
+    workdir: &Path,
+    revision: &str,
+) -> Result<(), VCSOperationError> {
+    // Use git archive to export the revision and pipe to tar for extraction
+    cmd!("git", "archive", "--format=tar", revision)
+        .dir(root_dir)
         .pipe(cmd!("tar", "x").dir(workdir))
         .run()
         .map_err(VCSOperationError::CommandFailed)?;

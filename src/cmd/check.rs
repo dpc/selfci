@@ -1,6 +1,6 @@
 use duct::cmd;
 use selfci::{
-    CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, detect_vcs, protocol,
+    CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, get_vcs, protocol,
     read_config,
 };
 use std::collections::HashMap;
@@ -160,19 +160,26 @@ pub fn check(
     candidate: Option<String>,
     print_output: bool,
     jobs: Option<usize>,
+    forced_vcs: Option<&str>,
 ) -> Result<(), MainError> {
     // Determine root directory
     let root_dir = root
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("Failed to get current directory"));
 
-    // Detect VCS
-    let vcs = detect_vcs(&root_dir)?;
-    debug!(vcs = ?vcs, root_dir = %root_dir.display(), "Detected VCS");
+    // Get VCS (forced or auto-detected)
+    let vcs = get_vcs(&root_dir, forced_vcs)?;
+    debug!(vcs = ?vcs, root_dir = %root_dir.display(), forced = forced_vcs.is_some(), "Using VCS");
 
-    // Use defaults for base and candidate if not provided
-    let base_rev = base.as_deref().unwrap_or("@-");
-    let candidate_rev = candidate.as_deref().unwrap_or("@");
+    // Use VCS-specific defaults for base and candidate if not provided
+    let base_rev = base.as_deref().unwrap_or_else(|| match vcs {
+        selfci::VCS::Jujutsu => "@-",
+        selfci::VCS::Git => "HEAD^",
+    });
+    let candidate_rev = candidate.as_deref().unwrap_or_else(|| match vcs {
+        selfci::VCS::Jujutsu => "@",
+        selfci::VCS::Git => "HEAD",
+    });
 
     // Allocate base work directory
     let base_workdir = tempfile::tempdir().map_err(WorkDirError::CreateFailed)?;

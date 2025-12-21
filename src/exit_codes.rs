@@ -1,0 +1,10 @@
+// Exit codes for selfci
+
+pub const EXIT_NO_VCS_FOUND: i32 = 1;
+pub const EXIT_INVALID_VCS_TYPE: i32 = 2;
+pub const EXIT_WORKDIR_CREATE_FAILED: i32 = 3;
+pub const EXIT_VCS_COMMAND_FAILED: i32 = 4;
+pub const EXIT_NOT_INITIALIZED: i32 = 5;
+pub const EXIT_CONFIG_READ_FAILED: i32 = 6;
+pub const EXIT_CONFIG_PARSE_FAILED: i32 = 7;
+pub const EXIT_CHECK_FAILED: i32 = 8;
