@@ -3,7 +3,8 @@ mod opts;
 
 use clap::Parser;
 use opts::{Cli, Commands, ReportCommands};
-use selfci::{detect_vcs, init_config, step, MainError};
+use selfci::{detect_vcs, init_config, protocol, MainError};
+use std::path::PathBuf;
 use tracing::debug;
 
 fn main() {
@@ -71,9 +72,75 @@ fn main_inner() -> Result<(), MainError> {
             }
         }
         Commands::Step { name } => {
-            if let Err(err) = step::log_step(name) {
-                eprintln!("Error logging step: {}", err);
-                std::process::exit(1);
+            // Get job name from environment
+            let job_name = match std::env::var("SELFCI_JOB_NAME") {
+                Ok(name) => name,
+                Err(_) => {
+                    eprintln!("Error: SELFCI_JOB_NAME environment variable not set");
+                    std::process::exit(1);
+                }
+            };
+
+            // Get socket path from environment
+            let socket_path = match std::env::var("SELFCI_JOB_SOCK_PATH") {
+                Ok(path) => PathBuf::from(path),
+                Err(_) => {
+                    eprintln!("Error: SELFCI_JOB_SOCK_PATH environment variable not set");
+                    std::process::exit(1);
+                }
+            };
+
+            // Send request to log step
+            let request = protocol::JobControlRequest::LogStep {
+                job_name,
+                step_name: name,
+            };
+            match protocol::send_request(&socket_path, request) {
+                Ok(protocol::JobControlResponse::StepLogged) => {
+                    // Success - silent exit
+                }
+                Ok(protocol::JobControlResponse::Error(err)) => {
+                    eprintln!("Error logging step: {}", err);
+                    std::process::exit(1);
+                }
+                Ok(_) => {
+                    eprintln!("Unexpected response from control socket");
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("Error communicating with control socket: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Job { name } => {
+            // Get socket path from environment
+            let socket_path = match std::env::var("SELFCI_JOB_SOCK_PATH") {
+                Ok(path) => PathBuf::from(path),
+                Err(_) => {
+                    eprintln!("Error: SELFCI_JOB_SOCK_PATH environment variable not set");
+                    std::process::exit(1);
+                }
+            };
+
+            // Send request to start job
+            let request = protocol::JobControlRequest::StartJob { name };
+            match protocol::send_request(&socket_path, request) {
+                Ok(protocol::JobControlResponse::JobStarted) => {
+                    // Success - silent exit
+                }
+                Ok(protocol::JobControlResponse::Error(err)) => {
+                    eprintln!("Error starting job: {}", err);
+                    std::process::exit(1);
+                }
+                Ok(_) => {
+                    eprintln!("Unexpected response from control socket");
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("Error communicating with control socket: {}", err);
+                    std::process::exit(1);
+                }
             }
         }
     }

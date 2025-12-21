@@ -1,12 +1,14 @@
 use duct::cmd;
 use selfci::{
-    step, CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, detect_vcs,
+    CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, detect_vcs, protocol,
     read_config,
 };
+use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 struct RunJobRequest {
@@ -15,7 +17,7 @@ struct RunJobRequest {
     job_name: String,
     job_full_command: Vec<String>,
     print_output: bool,
-    step_log_path: PathBuf,
+    socket_path: PathBuf,
 }
 
 struct RunJobOutcome {
@@ -23,7 +25,7 @@ struct RunJobOutcome {
     output: String,
     exit_code: Option<i32>,
     duration: Duration,
-    steps: Vec<step::StepLogEntry>,
+    steps: Vec<protocol::StepLogEntry>,
 }
 
 /// Worker thread function that processes jobs
@@ -46,26 +48,13 @@ fn job_worker(
         // Record start time
         let start_time = Instant::now();
 
-        // Initialize step log file
-        if let Err(e) = std::fs::write(&job.step_log_path, "[]") {
-            let outcome = RunJobOutcome {
-                job_name: job.job_name,
-                output: format!("Failed to initialize step log: {}", e),
-                exit_code: None,
-                duration: start_time.elapsed(),
-                steps: Vec::new(),
-            };
-            let _ = outcomes_sender.send(outcome);
-            continue;
-        }
-
         // Execute the job command
         let handle = match cmd(&job.job_full_command[0], &job.job_full_command[1..])
             .dir(&job.candidate_dir)
             .env("SELFCI_BASE_DIR", &job.base_dir)
             .env("SELFCI_CANDIDATE_DIR", &job.candidate_dir)
-            .env("SELFCI_JOB", &job.job_name)
-            .env("SELFCI_STEP_LOG_PATH", &job.step_log_path)
+            .env("SELFCI_JOB_NAME", &job.job_name)
+            .env("SELFCI_JOB_SOCK_PATH", &job.socket_path)
             .stderr_to_stdout()
             .unchecked()
             .reader()
@@ -110,16 +99,13 @@ fn job_worker(
         // Record end time and calculate duration
         let duration = start_time.elapsed();
 
-        // Read step log
-        let steps = step::read_step_log(&job.step_log_path).unwrap_or_else(|_| Vec::new());
-
-        // Send outcome
+        // Send outcome (steps will be looked up separately)
         let outcome = RunJobOutcome {
             job_name: job.job_name,
             output: captured_output,
             exit_code,
             duration,
-            steps,
+            steps: Vec::new(), // Will be populated in check() function
         };
         let _ = outcomes_sender.send(outcome);
     }
@@ -187,27 +173,22 @@ pub fn check(
     );
     debug!(base_rev, candidate_rev, "Check command invoked");
 
-    // Copy base revision to base workdir only
-    // We'll create separate candidate workdirs for each check
-    let temp_candidate = tempfile::tempdir().map_err(WorkDirError::CreateFailed)?;
+    // Create a single candidate workdir (shared by all jobs)
+    let candidate_workdir = tempfile::tempdir().map_err(WorkDirError::CreateFailed)?;
+
+    // Copy revisions to workdirs
     copy_revisions_to_workdirs(
         &vcs,
         &root_dir,
         base_workdir.path(),
         base_rev,
-        temp_candidate.path(),
+        candidate_workdir.path(),
         candidate_rev,
     )?;
-    drop(temp_candidate);
 
     // Read config from base workdir
     let config = read_config(base_workdir.path())?;
-    debug!(jobs_count = config.jobs.len(), "Loaded config");
-
-    if config.jobs.is_empty() {
-        println!("No jobs defined in config");
-        return Ok(());
-    }
+    debug!("Loaded config");
 
     // Determine parallelism level
     let parallelism = jobs.unwrap_or_else(|| {
@@ -217,12 +198,28 @@ pub fn check(
     });
     debug!(parallelism, "Using parallelism level");
 
-    println!("Running {} jobs with parallelism {}", config.jobs.len(), parallelism);
+    // Create control socket
+    let socket_file = tempfile::NamedTempFile::new().map_err(WorkDirError::CreateFailed)?;
+    let socket_path = socket_file.path().to_path_buf();
+    // Remove the temp file so we can bind to it as a socket
+    drop(socket_file);
+
+    let listener = UnixListener::bind(&socket_path).map_err(|_| CheckError::CheckFailed)?;
+    debug!(socket_path = %socket_path.display(), "Created control socket");
 
     // Create channels for jobs (SPMC) and outcomes (MPSC)
     let (jobs_sender, jobs_receiver) = mpsc::channel::<RunJobRequest>();
     let (outcomes_sender, outcomes_receiver) = mpsc::channel::<RunJobOutcome>();
     let jobs_receiver = Arc::new(Mutex::new(jobs_receiver));
+
+    // Job tracking: (started, completed)
+    let job_counts = Arc::new(Mutex::new((0usize, 0usize)));
+
+    // Track used job names
+    let used_job_names = Arc::new(Mutex::new(std::collections::HashSet::new()));
+
+    // Track steps for each job
+    let job_steps = Arc::new(Mutex::new(HashMap::<String, Vec<protocol::StepLogEntry>>::new()));
 
     // Spawn worker threads
     let mut workers = Vec::new();
@@ -235,70 +232,193 @@ pub fn check(
         });
         workers.push(handle);
     }
-    // Drop the original outcomes sender so the channel closes when all workers are done
-    drop(outcomes_sender);
 
-    // Prepare and send all jobs
-    let total_jobs = config.jobs.len();
-    for (job_name, job_config) in config.jobs {
-        // Create candidate workdir for this job
-        let candidate_workdir = tempfile::tempdir().map_err(WorkDirError::CreateFailed)?;
+    // Spawn control socket listener thread
+    let jobs_sender_clone = jobs_sender.clone();
+    let job_counts_clone = Arc::clone(&job_counts);
+    let used_job_names_clone = Arc::clone(&used_job_names);
+    let job_steps_clone = Arc::clone(&job_steps);
+    let base_workdir_path = base_workdir.path().to_path_buf();
+    let candidate_workdir_path = candidate_workdir.path().to_path_buf();
+    let job_config = config.job.clone();
+    let socket_path_clone = socket_path.clone();
 
-        // Copy candidate revision
-        copy_revisions_to_workdirs(
-            &vcs,
-            &root_dir,
-            candidate_workdir.path(),
-            candidate_rev,
-            candidate_workdir.path(),
-            candidate_rev,
-        )?;
+    let _listener_thread = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    // Read request
+                    let request = match protocol::read_request(&stream) {
+                        Ok(req) => req,
+                        Err(e) => {
+                            debug!("Failed to read request: {}", e);
+                            let _ = protocol::write_response(
+                                &mut stream,
+                                protocol::JobControlResponse::Error(e),
+                            );
+                            continue;
+                        }
+                    };
 
-        // Build the full command
-        let mut full_command = job_config.command_prefix.clone();
-        full_command.push(job_config.command.clone());
+                    match request {
+                        protocol::JobControlRequest::StartJob { name } => {
+                            // Check if job name is unique
+                            let mut used_names = used_job_names_clone.lock().unwrap();
+                            if used_names.contains(&name) {
+                                let error_msg = format!("Job '{}' already started", name);
+                                debug!("{}", error_msg);
+                                let _ = protocol::write_response(
+                                    &mut stream,
+                                    protocol::JobControlResponse::Error(error_msg),
+                                );
+                                continue;
+                            }
+                            used_names.insert(name.clone());
+                            drop(used_names);
 
-        // Create step log file path
-        let step_log_file = tempfile::NamedTempFile::new()
-            .map_err(WorkDirError::CreateFailed)?;
-        let step_log_path = step_log_file.path().to_path_buf();
+                            // Build the full command
+                            let mut full_command = job_config.command_prefix.clone();
+                            full_command.push(job_config.command.clone());
 
-        // Send job to workers
+                            // Create job request
+                            let job = RunJobRequest {
+                                base_dir: base_workdir_path.clone(),
+                                candidate_dir: candidate_workdir_path.clone(),
+                                job_name: name.clone(),
+                                job_full_command: full_command,
+                                print_output,
+                                socket_path: socket_path_clone.clone(),
+                            };
+
+                            // Send job to workers
+                            if let Err(e) = jobs_sender_clone.send(job) {
+                                let error_msg = format!("Failed to send job: {}", e);
+                                debug!("{}", error_msg);
+                                let _ = protocol::write_response(
+                                    &mut stream,
+                                    protocol::JobControlResponse::Error(error_msg),
+                                );
+                                continue;
+                            }
+
+                            // Increment started counter
+                            {
+                                let mut counts = job_counts_clone.lock().unwrap();
+                                counts.0 += 1;
+                            }
+
+                            // Send success response
+                            let _ = protocol::write_response(
+                                &mut stream,
+                                protocol::JobControlResponse::JobStarted,
+                            );
+
+                            debug!(job = %name, "Job started via control socket");
+                        }
+                        protocol::JobControlRequest::LogStep { job_name, step_name } => {
+                            // Get current timestamp
+                            let ts = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
+
+                            // Create step entry
+                            let entry = protocol::StepLogEntry {
+                                ts,
+                                name: step_name.clone(),
+                            };
+
+                            // Add to steps for this job
+                            {
+                                let mut steps = job_steps_clone.lock().unwrap();
+                                steps.entry(job_name.clone()).or_insert_with(Vec::new).push(entry);
+                            }
+
+                            // Send success response
+                            let _ = protocol::write_response(
+                                &mut stream,
+                                protocol::JobControlResponse::StepLogged,
+                            );
+
+                            debug!(job = %job_name, step = %step_name, "Step logged via control socket");
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("Failed to accept connection: {}", e);
+                }
+            }
+        }
+    });
+
+    // Start the "main" job
+    {
+        let mut used_names = used_job_names.lock().unwrap();
+        used_names.insert("main".to_string());
+        drop(used_names);
+
+        let mut full_command = config.job.command_prefix.clone();
+        full_command.push(config.job.command.clone());
+
         let job = RunJobRequest {
             base_dir: base_workdir.path().to_path_buf(),
             candidate_dir: candidate_workdir.path().to_path_buf(),
-            job_name: job_name.clone(),
+            job_name: "main".to_string(),
             job_full_command: full_command,
             print_output,
-            step_log_path,
+            socket_path: socket_path.clone(),
         };
 
         jobs_sender.send(job).map_err(|_| CheckError::CheckFailed)?;
 
-        // Keep the tempdir and step log file alive by leaking them
-        std::mem::forget(candidate_workdir);
-        std::mem::forget(step_log_file);
+        // Increment started counter
+        {
+            let mut counts = job_counts.lock().unwrap();
+            counts.0 += 1;
+        }
     }
 
-    // Drop jobs sender to signal no more jobs
+    // Drop the original senders
     drop(jobs_sender);
+    drop(outcomes_sender);
+
+    println!("Running jobs with parallelism {}", parallelism);
 
     // Collect outcomes as they arrive
-    let mut completed = 0;
     let mut failed_jobs = Vec::new();
     let mut total_duration = Duration::ZERO;
 
-    for outcome in outcomes_receiver {
-        completed += 1;
+    for mut outcome in outcomes_receiver {
+        // Increment completed counter
+        let (started, completed) = {
+            let mut counts = job_counts.lock().unwrap();
+            counts.1 += 1;
+            *counts
+        };
+
+        // Look up steps for this job
+        {
+            let steps_map = job_steps.lock().unwrap();
+            if let Some(steps) = steps_map.get(&outcome.job_name) {
+                outcome.steps = steps.clone();
+            }
+        }
+
         total_duration += outcome.duration;
 
         let duration_secs = outcome.duration.as_secs_f64();
 
         if let Some(exit_code) = outcome.exit_code {
             if exit_code == 0 {
-                println!("[{}/{}] Job '{}' passed ({:.2}s)", completed, total_jobs, outcome.job_name, duration_secs);
+                println!(
+                    "[{}/{}] Job '{}' passed ({:.2}s)",
+                    completed, started, outcome.job_name, duration_secs
+                );
             } else {
-                println!("[{}/{}] Job '{}' failed (exit code: {}, {:.2}s)", completed, total_jobs, outcome.job_name, exit_code, duration_secs);
+                println!(
+                    "[{}/{}] Job '{}' failed (exit code: {}, {:.2}s)",
+                    completed, started, outcome.job_name, exit_code, duration_secs
+                );
                 // Print output on failure if we weren't already printing it in real-time
                 if !print_output && !outcome.output.is_empty() {
                     println!("{}", outcome.output);
@@ -306,7 +426,10 @@ pub fn check(
                 failed_jobs.push((outcome.job_name, outcome.output));
             }
         } else {
-            println!("[{}/{}] Job '{}' failed (no exit code, {:.2}s)", completed, total_jobs, outcome.job_name, duration_secs);
+            println!(
+                "[{}/{}] Job '{}' failed (no exit code, {:.2}s)",
+                completed, started, outcome.job_name, duration_secs
+            );
             // Print output on failure if we weren't already printing it in real-time
             if !print_output && !outcome.output.is_empty() {
                 println!("{}", outcome.output);
@@ -327,12 +450,20 @@ pub fn check(
                 println!("  - {} ({:.2}s)", step_entry.name, step_duration as f64);
             }
         }
+
+        // Check if all started jobs are completed
+        if started == completed {
+            break;
+        }
     }
 
-    // Wait for all workers to finish
-    for worker in workers {
-        let _ = worker.join();
-    }
+    // Clean up socket
+    let _ = std::fs::remove_file(&socket_path);
+
+    // Note: We don't wait for workers or listener thread to finish.
+    // They will be cleaned up when the process exits.
+    // Workers are blocked waiting for jobs, and the listener holds a jobs_sender clone,
+    // so the jobs channel won't close until the listener exits.
 
     // Print total time
     println!("\nTotal time: {:.2}s", total_duration.as_secs_f64());

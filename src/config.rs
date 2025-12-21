@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ConfigError;
@@ -10,7 +9,7 @@ fn default_command_prefix() -> Vec<String> {
     vec!["bash".to_string(), "-c".to_string()]
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct JobConfig {
     pub command: String,
     #[serde(default = "default_command_prefix", rename = "command-prefix")]
@@ -19,7 +18,7 @@ pub struct JobConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct SelfCIConfig {
-    pub jobs: HashMap<String, JobConfig>,
+    pub job: JobConfig,
 }
 
 pub fn read_config(base_workdir: &Path) -> Result<SelfCIConfig, ConfigError> {
@@ -83,7 +82,7 @@ mod tests {
         assert!(config.is_ok(), "Should be able to read initialized config");
 
         // Write custom content to the config
-        let custom_content = "# Custom config\njobs:\n  test:\n    command: my custom command\n";
+        let custom_content = "# Custom config\njob:\n  command: my custom command\n";
         std::fs::write(&config_path, custom_content).expect("Failed to write custom config");
 
         // Call init_config again

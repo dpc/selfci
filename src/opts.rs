@@ -44,6 +44,11 @@ pub enum Commands {
         /// Name of the step
         name: String,
     },
+    /// Start a new job (used inside check commands)
+    Job {
+        /// Name of the job
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]

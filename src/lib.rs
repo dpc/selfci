@@ -1,5 +1,5 @@
 pub mod config;
-pub mod step;
+pub mod protocol;
 
 use duct::cmd;
 use error_set::error_set;
@@ -160,7 +160,7 @@ mod tests {
             .expect("Failed to create config dir");
         fs::write(
             repo_path.join(".config").join("selfci").join("config.yml"),
-            "jobs:\n  test:\n    command: echo test\n",
+            "job:\n  command: echo test\n",
         )
         .expect("Failed to write config");
 

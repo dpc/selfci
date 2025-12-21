@@ -1,15 +1,29 @@
-checks:
-  cargo-check:
-    command: |
-      set -eou pipefail
+job:
+  command: |
+    set -eou pipefail
 
-      selfci step "cargo check"
-      cargo check
+    case "$SELFCI_JOB_NAME" in
+      main)
+        selfci job "lint"
+        selfci job "cargo"
+        ;;
 
-  always-fail:
-    command:
-      false
+      cargo)
+        selfci step "cargo check"
+        cargo check
 
-  always-success:
-    command:
-      true
+        selfci step "cargo build"
+        cargo build
+        ;;
+
+      lint)
+        echo "Lint passed"
+        echo "Or failed"
+        false
+        ;;
+
+      *)
+        echo "Unknown job: $SELFCI_JOB_NAME"
+        exit 1
+    esac
+
