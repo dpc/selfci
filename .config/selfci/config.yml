@@ -1,0 +1,15 @@
+checks:
+  cargo-check:
+    command: |
+      set -eou pipefail
+
+      selfci step "cargo check"
+      cargo check
+
+  always-fail:
+    command:
+      false
+
+  always-success:
+    command:
+      true

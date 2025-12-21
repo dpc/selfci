@@ -1,0 +1,22 @@
+# SelfCI Configuration
+
+jobs:
+  # Each job runs in its own candidate workdir in parallel
+  main:
+    # This command will be executed in the candidate workdir
+    command: |
+      set -eou pipefail
+
+      >&2 echo "CI not configured"
+      exit 99
+
+    # Command prefix for executing the command
+    # Can be used to change the shell, or disable shell interpretation
+    # of `command` altogether.
+    # command-prefix: ["bash", "-c"]
+
+  # You can add more jobs here
+  # lint:
+  #   command: cargo clippy
+  # test:
+  #   command: cargo test
