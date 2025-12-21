@@ -4,21 +4,31 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StepStatus {
+    Running,
+    Success,
+    Failed { ignored: bool },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepLogEntry {
     pub ts: u64,
     pub name: String,
+    pub status: StepStatus,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum JobControlRequest {
     StartJob { name: String },
     LogStep { job_name: String, step_name: String },
+    MarkStepFailed { job_name: String, ignore: bool },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum JobControlResponse {
     JobStarted,
     StepLogged,
+    StepMarkedFailed,
     Error(String),
 }
 

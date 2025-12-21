@@ -28,10 +28,15 @@ struct RunJobOutcome {
     steps: Vec<protocol::StepLogEntry>,
 }
 
+enum JobMessage {
+    Started { job_name: String },
+    Completed(RunJobOutcome),
+}
+
 /// Worker thread function that processes jobs
 fn job_worker(
     jobs_receiver: Arc<Mutex<mpsc::Receiver<RunJobRequest>>>,
-    outcomes_sender: mpsc::Sender<RunJobOutcome>,
+    messages_sender: mpsc::Sender<JobMessage>,
 ) {
     loop {
         // Receive a job from the channel
@@ -44,6 +49,11 @@ fn job_worker(
         };
 
         debug!(job = %job.job_name, "Worker processing job");
+
+        // Send started message
+        let _ = messages_sender.send(JobMessage::Started {
+            job_name: job.job_name.clone(),
+        });
 
         // Record start time
         let start_time = Instant::now();
@@ -68,7 +78,7 @@ fn job_worker(
                     duration: start_time.elapsed(),
                     steps: Vec::new(),
                 };
-                let _ = outcomes_sender.send(outcome);
+                let _ = messages_sender.send(JobMessage::Completed(outcome));
                 continue;
             }
         };
@@ -84,7 +94,7 @@ fn job_worker(
                     duration: start_time.elapsed(),
                     steps: Vec::new(),
                 };
-                let _ = outcomes_sender.send(outcome);
+                let _ = messages_sender.send(JobMessage::Completed(outcome));
                 continue;
             }
         };
@@ -107,7 +117,7 @@ fn job_worker(
             duration,
             steps: Vec::new(), // Will be populated in check() function
         };
-        let _ = outcomes_sender.send(outcome);
+        let _ = messages_sender.send(JobMessage::Completed(outcome));
     }
 }
 
@@ -207,9 +217,9 @@ pub fn check(
     let listener = UnixListener::bind(&socket_path).map_err(|_| CheckError::CheckFailed)?;
     debug!(socket_path = %socket_path.display(), "Created control socket");
 
-    // Create channels for jobs (SPMC) and outcomes (MPSC)
+    // Create channels for jobs (SPMC) and messages (MPSC)
     let (jobs_sender, jobs_receiver) = mpsc::channel::<RunJobRequest>();
-    let (outcomes_sender, outcomes_receiver) = mpsc::channel::<RunJobOutcome>();
+    let (messages_sender, messages_receiver) = mpsc::channel::<JobMessage>();
     let jobs_receiver = Arc::new(Mutex::new(jobs_receiver));
 
     // Job tracking: (started, completed)
@@ -225,10 +235,10 @@ pub fn check(
     let mut workers = Vec::new();
     for _ in 0..parallelism {
         let jobs_rx = Arc::clone(&jobs_receiver);
-        let outcomes_tx = outcomes_sender.clone();
+        let messages_tx = messages_sender.clone();
 
         let handle = std::thread::spawn(move || {
-            job_worker(jobs_rx, outcomes_tx);
+            job_worker(jobs_rx, messages_tx);
         });
         workers.push(handle);
     }
@@ -322,10 +332,11 @@ pub fn check(
                                 .unwrap()
                                 .as_secs();
 
-                            // Create step entry
+                            // Create step entry with Running status
                             let entry = protocol::StepLogEntry {
                                 ts,
                                 name: step_name.clone(),
+                                status: protocol::StepStatus::Running,
                             };
 
                             // Add to steps for this job
@@ -341,6 +352,40 @@ pub fn check(
                             );
 
                             debug!(job = %job_name, step = %step_name, "Step logged via control socket");
+                        }
+                        protocol::JobControlRequest::MarkStepFailed { job_name, ignore } => {
+                            // Find the last step for this job and mark it as failed
+                            {
+                                let mut steps = job_steps_clone.lock().unwrap();
+                                if let Some(job_steps) = steps.get_mut(&job_name) {
+                                    if let Some(last_step) = job_steps.last_mut() {
+                                        last_step.status = protocol::StepStatus::Failed { ignored: ignore };
+                                        debug!(job = %job_name, step = %last_step.name, ignore, "Step marked as failed");
+                                    } else {
+                                        let error_msg = format!("No steps found for job '{}'", job_name);
+                                        debug!("{}", error_msg);
+                                        let _ = protocol::write_response(
+                                            &mut stream,
+                                            protocol::JobControlResponse::Error(error_msg),
+                                        );
+                                        continue;
+                                    }
+                                } else {
+                                    let error_msg = format!("Job '{}' not found", job_name);
+                                    debug!("{}", error_msg);
+                                    let _ = protocol::write_response(
+                                        &mut stream,
+                                        protocol::JobControlResponse::Error(error_msg),
+                                    );
+                                    continue;
+                                }
+                            }
+
+                            // Send success response
+                            let _ = protocol::write_response(
+                                &mut stream,
+                                protocol::JobControlResponse::StepMarkedFailed,
+                            );
                         }
                     }
                 }
@@ -380,80 +425,118 @@ pub fn check(
 
     // Drop the original senders
     drop(jobs_sender);
-    drop(outcomes_sender);
+    drop(messages_sender);
 
     println!("Running jobs with parallelism {}", parallelism);
 
-    // Collect outcomes as they arrive
+    // Collect messages as they arrive
     let mut failed_jobs = Vec::new();
     let mut total_duration = Duration::ZERO;
 
-    for mut outcome in outcomes_receiver {
-        // Increment completed counter
-        let (started, completed) = {
-            let mut counts = job_counts.lock().unwrap();
-            counts.1 += 1;
-            *counts
-        };
-
-        // Look up steps for this job
-        {
-            let steps_map = job_steps.lock().unwrap();
-            if let Some(steps) = steps_map.get(&outcome.job_name) {
-                outcome.steps = steps.clone();
-            }
-        }
-
-        total_duration += outcome.duration;
-
-        let duration_secs = outcome.duration.as_secs_f64();
-
-        if let Some(exit_code) = outcome.exit_code {
-            if exit_code == 0 {
-                println!(
-                    "[{}/{}] Job '{}' passed ({:.2}s)",
-                    completed, started, outcome.job_name, duration_secs
-                );
-            } else {
-                println!(
-                    "[{}/{}] Job '{}' failed (exit code: {}, {:.2}s)",
-                    completed, started, outcome.job_name, exit_code, duration_secs
-                );
-                // Print output on failure if we weren't already printing it in real-time
-                if !print_output && !outcome.output.is_empty() {
-                    println!("{}", outcome.output);
-                }
-                failed_jobs.push((outcome.job_name, outcome.output));
-            }
-        } else {
-            println!(
-                "[{}/{}] Job '{}' failed (no exit code, {:.2}s)",
-                completed, started, outcome.job_name, duration_secs
-            );
-            // Print output on failure if we weren't already printing it in real-time
-            if !print_output && !outcome.output.is_empty() {
-                println!("{}", outcome.output);
-            }
-            failed_jobs.push((outcome.job_name, outcome.output));
-        }
-
-        // Print steps if any
-        if !outcome.steps.is_empty() {
-            let end_ts = outcome.steps[0].ts + outcome.duration.as_secs();
-            for (i, step_entry) in outcome.steps.iter().enumerate() {
-                let next_ts = if i + 1 < outcome.steps.len() {
-                    outcome.steps[i + 1].ts
-                } else {
-                    end_ts
+    for message in messages_receiver {
+        match message {
+            JobMessage::Started { job_name } => {
+                let (started, completed) = {
+                    let counts = job_counts.lock().unwrap();
+                    *counts
                 };
-                let step_duration = next_ts.saturating_sub(step_entry.ts);
-                println!("  - {} ({:.2}s)", step_entry.name, step_duration as f64);
+                println!("[{}/{}] Job started: {}", completed, started, job_name);
             }
-        }
+            JobMessage::Completed(mut outcome) => {
+                // Increment completed counter
+                let (started, completed) = {
+                    let mut counts = job_counts.lock().unwrap();
+                    counts.1 += 1;
+                    *counts
+                };
 
-        // Check if all started jobs are completed
-        if started == completed {
-            break;
+                // Look up steps for this job and mark Running steps as Success
+                {
+                    let steps_map = job_steps.lock().unwrap();
+                    if let Some(steps) = steps_map.get(&outcome.job_name) {
+                        outcome.steps = steps.iter().map(|step| {
+                            let mut step = step.clone();
+                            if matches!(step.status, protocol::StepStatus::Running) {
+                                step.status = protocol::StepStatus::Success;
+                            }
+                            step
+                        }).collect();
+                    }
+                }
+
+                // Check if any step has a non-ignored failure
+                let has_step_failure = outcome.steps.iter().any(|step| {
+                    matches!(step.status, protocol::StepStatus::Failed { ignored: false })
+                });
+
+                total_duration += outcome.duration;
+
+                let duration_secs = outcome.duration.as_secs_f64();
+
+                // Determine if job passed or failed
+                let job_passed = if let Some(exit_code) = outcome.exit_code {
+                    exit_code == 0 && !has_step_failure
+                } else {
+                    false
+                };
+
+                if job_passed {
+                    println!(
+                        "[{}/{}] Job passed: {} ({:.2}s)",
+                        completed, started, outcome.job_name, duration_secs
+                    );
+                } else {
+                    let failure_reason = if has_step_failure {
+                        "step failure"
+                    } else if let Some(_exit_code) = outcome.exit_code {
+                        "exit code"
+                    } else {
+                        "no exit code"
+                    };
+
+                    let exit_code_str = outcome.exit_code
+                        .map(|c| format!(" (exit code: {})", c))
+                        .unwrap_or_default();
+
+                    println!(
+                        "[{}/{}] Job failed: {} ({}{}, {:.2}s)",
+                        completed, started, outcome.job_name, failure_reason, exit_code_str, duration_secs
+                    );
+                    // Print output on failure if we weren't already printing it in real-time
+                    if !print_output && !outcome.output.is_empty() {
+                        println!("{}", outcome.output);
+                    }
+                    failed_jobs.push((outcome.job_name, outcome.output));
+                }
+
+                // Print steps if any
+                if !outcome.steps.is_empty() {
+                    let end_ts = outcome.steps[0].ts + outcome.duration.as_secs();
+                    for (i, step_entry) in outcome.steps.iter().enumerate() {
+                        let next_ts = if i + 1 < outcome.steps.len() {
+                            outcome.steps[i + 1].ts
+                        } else {
+                            end_ts
+                        };
+                        let step_duration = next_ts.saturating_sub(step_entry.ts);
+
+                        // Choose emoji based on step status
+                        let status_emoji = match &step_entry.status {
+                            protocol::StepStatus::Success => "✅",
+                            protocol::StepStatus::Failed { ignored: true } => "⚠️",
+                            protocol::StepStatus::Failed { ignored: false } => "❌",
+                            protocol::StepStatus::Running => "⏳",
+                        };
+
+                        println!("  {} {} ({:.2}s)", status_emoji, step_entry.name, step_duration as f64);
+                    }
+                }
+
+                // Check if all started jobs are completed
+                if started == completed {
+                    break;
+                }
+            }
         }
     }
 

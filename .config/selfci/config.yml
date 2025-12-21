@@ -4,22 +4,24 @@ job:
 
     case "$SELFCI_JOB_NAME" in
       main)
-        selfci job "lint"
-        selfci job "cargo"
+        selfci job start "lint"
+        selfci job start "cargo"
         ;;
 
       cargo)
-        selfci step "cargo check"
+        selfci step start "cargo check"
         cargo check
 
-        selfci step "cargo build"
+        selfci step start "cargo build"
         cargo build
         ;;
 
       lint)
-        echo "Lint passed"
-        echo "Or failed"
-        false
+        selfci step start "Fake step"
+        selfci step fail --ignore
+        selfci step start "Fake step2 "
+        selfci step fail
+        selfci step start "Fake step 3"
         ;;
 
       *)

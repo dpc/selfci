@@ -39,15 +39,15 @@ pub enum Commands {
         #[command(subcommand)]
         report_command: ReportCommands,
     },
-    /// Log a step (used inside check commands)
+    /// Step tracking commands (used inside check commands)
     Step {
-        /// Name of the step
-        name: String,
+        #[command(subcommand)]
+        step_command: StepCommands,
     },
-    /// Start a new job (used inside check commands)
+    /// Job control commands (used inside check commands)
     Job {
-        /// Name of the job
-        name: String,
+        #[command(subcommand)]
+        job_command: JobCommands,
     },
 }
 
@@ -61,4 +61,28 @@ pub enum ReportCommands {
     Run,
     /// Report init
     Init,
+}
+
+#[derive(Subcommand)]
+pub enum StepCommands {
+    /// Start a new step
+    Start {
+        /// Name of the step
+        name: String,
+    },
+    /// Mark the last started step as failed
+    Fail {
+        /// Ignore this failure (don't fail the job)
+        #[arg(long)]
+        ignore: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum JobCommands {
+    /// Start a new job
+    Start {
+        /// Name of the job
+        name: String,
+    },
 }

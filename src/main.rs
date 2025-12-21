@@ -2,7 +2,7 @@ mod cmd;
 mod opts;
 
 use clap::Parser;
-use opts::{Cli, Commands, ReportCommands};
+use opts::{Cli, Commands, JobCommands, ReportCommands, StepCommands};
 use selfci::{detect_vcs, init_config, protocol, MainError};
 use std::path::PathBuf;
 use tracing::debug;
@@ -71,7 +71,7 @@ fn main_inner() -> Result<(), MainError> {
                 }
             }
         }
-        Commands::Step { name } => {
+        Commands::Step { step_command } => {
             // Get job name from environment
             let job_name = match std::env::var("SELFCI_JOB_NAME") {
                 Ok(name) => name,
@@ -90,30 +90,58 @@ fn main_inner() -> Result<(), MainError> {
                 }
             };
 
-            // Send request to log step
-            let request = protocol::JobControlRequest::LogStep {
-                job_name,
-                step_name: name,
-            };
-            match protocol::send_request(&socket_path, request) {
-                Ok(protocol::JobControlResponse::StepLogged) => {
-                    // Success - silent exit
+            match step_command {
+                StepCommands::Start { name } => {
+                    // Send request to log step
+                    let request = protocol::JobControlRequest::LogStep {
+                        job_name,
+                        step_name: name,
+                    };
+                    match protocol::send_request(&socket_path, request) {
+                        Ok(protocol::JobControlResponse::StepLogged) => {
+                            // Success - silent exit
+                        }
+                        Ok(protocol::JobControlResponse::Error(err)) => {
+                            eprintln!("Error logging step: {}", err);
+                            std::process::exit(1);
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected response from control socket");
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("Error communicating with control socket: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
                 }
-                Ok(protocol::JobControlResponse::Error(err)) => {
-                    eprintln!("Error logging step: {}", err);
-                    std::process::exit(1);
-                }
-                Ok(_) => {
-                    eprintln!("Unexpected response from control socket");
-                    std::process::exit(1);
-                }
-                Err(err) => {
-                    eprintln!("Error communicating with control socket: {}", err);
-                    std::process::exit(1);
+                StepCommands::Fail { ignore } => {
+                    // Send request to mark step as failed
+                    let request = protocol::JobControlRequest::MarkStepFailed {
+                        job_name,
+                        ignore,
+                    };
+                    match protocol::send_request(&socket_path, request) {
+                        Ok(protocol::JobControlResponse::StepMarkedFailed) => {
+                            // Success - silent exit
+                        }
+                        Ok(protocol::JobControlResponse::Error(err)) => {
+                            eprintln!("Error marking step as failed: {}", err);
+                            std::process::exit(1);
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected response from control socket");
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("Error communicating with control socket: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
         }
-        Commands::Job { name } => {
+        Commands::Job { job_command } => {
             // Get socket path from environment
             let socket_path = match std::env::var("SELFCI_JOB_SOCK_PATH") {
                 Ok(path) => PathBuf::from(path),
@@ -123,23 +151,27 @@ fn main_inner() -> Result<(), MainError> {
                 }
             };
 
-            // Send request to start job
-            let request = protocol::JobControlRequest::StartJob { name };
-            match protocol::send_request(&socket_path, request) {
-                Ok(protocol::JobControlResponse::JobStarted) => {
-                    // Success - silent exit
-                }
-                Ok(protocol::JobControlResponse::Error(err)) => {
-                    eprintln!("Error starting job: {}", err);
-                    std::process::exit(1);
-                }
-                Ok(_) => {
-                    eprintln!("Unexpected response from control socket");
-                    std::process::exit(1);
-                }
-                Err(err) => {
-                    eprintln!("Error communicating with control socket: {}", err);
-                    std::process::exit(1);
+            match job_command {
+                JobCommands::Start { name } => {
+                    // Send request to start job
+                    let request = protocol::JobControlRequest::StartJob { name };
+                    match protocol::send_request(&socket_path, request) {
+                        Ok(protocol::JobControlResponse::JobStarted) => {
+                            // Success - silent exit
+                        }
+                        Ok(protocol::JobControlResponse::Error(err)) => {
+                            eprintln!("Error starting job: {}", err);
+                            std::process::exit(1);
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected response from control socket");
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("Error communicating with control socket: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
         }
