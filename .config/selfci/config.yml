@@ -14,6 +14,9 @@ job:
 
         selfci step start "cargo build"
         cargo build
+
+        selfci step start "cargo nextest run"
+        cargo nextest run
         ;;
 
       lint)

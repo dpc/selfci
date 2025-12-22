@@ -203,7 +203,23 @@ pub fn check(
         candidate_rev,
     )?;
 
-    // Read config from base workdir
+    // SECURITY: Read config from base workdir, NOT candidate workdir
+    //
+    // This is a critical security feature. The config must always be read from the
+    // base (already-reviewed) revision, not the candidate (untrusted) revision.
+    //
+    // If we read from the candidate workdir, an attacker could bypass CI checks by
+    // simply modifying the config in their commit to do nothing or always pass:
+    //   1. Attacker creates malicious code in candidate commit
+    //   2. Attacker also modifies .config/selfci/config.yml to "command: exit 0"
+    //   3. If we read config from candidate, CI would pass despite malicious code
+    //
+    // By reading from base, we ensure:
+    //   - Config changes themselves must pass CI before being used
+    //   - You cannot bypass checks by modifying the config
+    //   - CI behavior is determined by the trusted base, not untrusted candidate
+    //
+    // See test: test_config_read_from_base_security
     let config = read_config(base_workdir.path())?;
     debug!("Loaded config");
 
