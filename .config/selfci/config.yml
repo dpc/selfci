@@ -34,4 +34,3 @@ job:
         echo "Unknown job: $SELFCI_JOB_NAME"
         exit 1
     esac
-

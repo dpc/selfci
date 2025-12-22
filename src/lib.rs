@@ -1,5 +1,6 @@
 pub mod config;
 pub mod exit_codes;
+pub mod mq_protocol;
 pub mod protocol;
 
 use duct::cmd;

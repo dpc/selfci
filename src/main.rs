@@ -175,6 +175,22 @@ fn main_inner() -> Result<(), MainError> {
                 }
             }
         }
+        Commands::Mq(mq_command) => {
+            match mq_command {
+                opts::MQCommands::Start { base_branch } => {
+                    cmd::mq::start_daemon(base_branch)?;
+                }
+                opts::MQCommands::Add { candidate, no_merge } => {
+                    cmd::mq::add_candidate(candidate, no_merge)?;
+                }
+                opts::MQCommands::List { limit } => {
+                    cmd::mq::list_jobs(limit)?;
+                }
+                opts::MQCommands::Status { job_id } => {
+                    cmd::mq::get_status(job_id)?;
+                }
+            }
+        }
     }
 
     Ok(())

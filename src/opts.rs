@@ -53,6 +53,9 @@ pub enum Commands {
         #[command(subcommand)]
         job_command: JobCommands,
     },
+    /// Merge queue commands
+    #[command(subcommand)]
+    Mq(MQCommands),
 }
 
 #[derive(Subcommand)]
@@ -88,5 +91,36 @@ pub enum JobCommands {
     Start {
         /// Name of the job
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MQCommands {
+    /// Start the merge queue daemon
+    Start {
+        /// Base branch to merge into
+        #[arg(long)]
+        base_branch: String,
+    },
+    /// Add a candidate to the merge queue
+    Add {
+        /// Candidate revision to check and merge
+        #[arg(long)]
+        candidate: String,
+
+        /// Don't merge even if check passes (dry-run)
+        #[arg(long)]
+        no_merge: bool,
+    },
+    /// List jobs in the merge queue
+    List {
+        /// Number of recent jobs to show
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+    },
+    /// Get status of a specific job
+    Status {
+        /// Job ID to query
+        job_id: u64,
     },
 }

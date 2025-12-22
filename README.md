@@ -101,7 +101,7 @@ I hope this bash script will not scare you.
 It is meant to be just a convenient demonstration.
 
 All CI rules are implemented through the execution
-of a single script/command.
+of a single script/command - so called "candidate check".
 
 When the CI run starts this command will be executed with the `SELFCI_JOB_NAME`
 environment variable set to `main`, `SELFCI_CANDIDATE_DIR` will point at
