@@ -21,10 +21,13 @@ job:
 
       lint)
         selfci step start "Fake step"
+        sleep .1
         selfci step fail --ignore
         selfci step start "Fake step2 "
+        sleep .2
         selfci step fail
         selfci step start "Fake step 3"
+        sleep .3
         ;;
 
       *)

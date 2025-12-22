@@ -1,14 +1,13 @@
 use duct::cmd;
 use selfci::{
-    CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, get_vcs, protocol,
-    read_config,
+    CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, get_vcs, protocol, read_config,
 };
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::debug;
 
 struct RunJobRequest {
@@ -252,7 +251,9 @@ pub fn check(
     let used_job_names = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     // Track steps for each job
-    let job_steps = Arc::new(Mutex::new(HashMap::<String, Vec<protocol::StepLogEntry>>::new()));
+    let job_steps = Arc::new(Mutex::new(
+        HashMap::<String, Vec<protocol::StepLogEntry>>::new(),
+    ));
 
     // Spawn worker threads
     let mut workers = Vec::new();
@@ -348,12 +349,11 @@ pub fn check(
 
                             debug!(job = %name, "Job started via control socket");
                         }
-                        protocol::JobControlRequest::LogStep { job_name, step_name } => {
-                            // Get current timestamp
-                            let ts = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
+                        protocol::JobControlRequest::LogStep {
+                            job_name,
+                            step_name,
+                        } => {
+                            let ts = SystemTime::now();
 
                             // Create step entry with Running status
                             let entry = protocol::StepLogEntry {
@@ -365,7 +365,10 @@ pub fn check(
                             // Add to steps for this job
                             {
                                 let mut steps = job_steps_clone.lock().unwrap();
-                                steps.entry(job_name.clone()).or_insert_with(Vec::new).push(entry);
+                                steps
+                                    .entry(job_name.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(entry);
                             }
 
                             // Send success response
@@ -382,10 +385,12 @@ pub fn check(
                                 let mut steps = job_steps_clone.lock().unwrap();
                                 if let Some(job_steps) = steps.get_mut(&job_name) {
                                     if let Some(last_step) = job_steps.last_mut() {
-                                        last_step.status = protocol::StepStatus::Failed { ignored: ignore };
+                                        last_step.status =
+                                            protocol::StepStatus::Failed { ignored: ignore };
                                         debug!(job = %job_name, step = %last_step.name, ignore, "Step marked as failed");
                                     } else {
-                                        let error_msg = format!("No steps found for job '{}'", job_name);
+                                        let error_msg =
+                                            format!("No steps found for job '{}'", job_name);
                                         debug!("{}", error_msg);
                                         let _ = protocol::write_response(
                                             &mut stream,
@@ -477,13 +482,16 @@ pub fn check(
                 {
                     let steps_map = job_steps.lock().unwrap();
                     if let Some(steps) = steps_map.get(&outcome.job_name) {
-                        outcome.steps = steps.iter().map(|step| {
-                            let mut step = step.clone();
-                            if matches!(step.status, protocol::StepStatus::Running) {
-                                step.status = protocol::StepStatus::Success;
-                            }
-                            step
-                        }).collect();
+                        outcome.steps = steps
+                            .iter()
+                            .map(|step| {
+                                let mut step = step.clone();
+                                if matches!(step.status, protocol::StepStatus::Running) {
+                                    step.status = protocol::StepStatus::Success;
+                                }
+                                step
+                            })
+                            .collect();
                     }
                 }
 
@@ -505,7 +513,7 @@ pub fn check(
 
                 if job_passed {
                     println!(
-                        "[{}/{}] Job passed: {} ({:.2}s)",
+                        "[{}/{}] Job passed: {} ({:.3}s)",
                         completed, started, outcome.job_name, duration_secs
                     );
                 } else {
@@ -517,13 +525,19 @@ pub fn check(
                         "no exit code"
                     };
 
-                    let exit_code_str = outcome.exit_code
-                        .map(|c| format!(" (exit code: {})", c))
+                    let exit_code_str = outcome
+                        .exit_code
+                        .map(|c| format!(", exit code: {}", c))
                         .unwrap_or_default();
 
                     println!(
-                        "[{}/{}] Job failed: {} ({}{}, {:.2}s)",
-                        completed, started, outcome.job_name, failure_reason, exit_code_str, duration_secs
+                        "[{}/{}] Job failed: {} ({}{}, {:.3}s)",
+                        completed,
+                        started,
+                        outcome.job_name,
+                        failure_reason,
+                        exit_code_str,
+                        duration_secs
                     );
                     // Print output on failure if we weren't already printing it in real-time
                     if !print_output && !outcome.output.is_empty() {
@@ -534,14 +548,20 @@ pub fn check(
 
                 // Print steps if any
                 if !outcome.steps.is_empty() {
-                    let end_ts = outcome.steps[0].ts + outcome.duration.as_secs();
+                    // Calculate end time by adding job duration to first step's start time
+                    let end_ts = outcome.steps[0].ts + outcome.duration;
+
                     for (i, step_entry) in outcome.steps.iter().enumerate() {
                         let next_ts = if i + 1 < outcome.steps.len() {
                             outcome.steps[i + 1].ts
                         } else {
                             end_ts
                         };
-                        let step_duration = next_ts.saturating_sub(step_entry.ts);
+
+                        // Calculate step duration using proper Duration type
+                        let step_duration = next_ts
+                            .duration_since(step_entry.ts)
+                            .unwrap_or(Duration::ZERO);
 
                         // Choose emoji based on step status
                         let status_emoji = match &step_entry.status {
@@ -551,7 +571,12 @@ pub fn check(
                             protocol::StepStatus::Running => "⏳",
                         };
 
-                        println!("  {} {} ({:.2}s)", status_emoji, step_entry.name, step_duration as f64);
+                        println!(
+                            "  {} {} ({:.3}s)",
+                            status_emoji,
+                            step_entry.name,
+                            step_duration.as_secs_f64()
+                        );
                     }
                 }
 
@@ -572,7 +597,7 @@ pub fn check(
     // so the jobs channel won't close until the listener exits.
 
     // Print total time
-    println!("\nTotal time: {:.2}s", total_duration.as_secs_f64());
+    println!("\nTotal time: {:.3}s", total_duration.as_secs_f64());
 
     // Report failures
     if !failed_jobs.is_empty() {

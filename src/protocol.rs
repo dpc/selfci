@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StepStatus {
@@ -12,7 +13,7 @@ pub enum StepStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepLogEntry {
-    pub ts: u64,
+    pub ts: SystemTime,
     pub name: String,
     pub status: StepStatus,
 }
