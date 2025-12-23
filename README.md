@@ -183,3 +183,21 @@ While we're considering the security - note that the CI
 runs the command from the base, not the candidate. This
 way the base revision, which is implicitly considered
 the vetted and trusted one is in control of the CI.
+
+### Future
+
+After the local-first approach is validated, the feature-set
+can be expanded.
+
+For a project that is very active, with many contributors,
+it makes sense to easily run a server-side instance of
+`selfci` that would automatically check, merge and publish
+updated trunk branch.
+
+To facilitate that I'm planning to use [Iroh](https://iroh.network/) P2P
+networking and some cryptography. It should also be possible
+to pool computers of multiple maintainers to handle running
+the CI runs.
+
+All of this, leaving the simple yet flexible core local-first
+model.
