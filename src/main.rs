@@ -2,8 +2,8 @@ mod cmd;
 mod opts;
 
 use clap::Parser;
-use opts::{Cli, Commands, JobCommands, ReportCommands, StepCommands};
-use selfci::{detect_vcs, init_config, protocol, MainError};
+use opts::{Cli, Commands, JobCommands, StepCommands};
+use selfci::{MainError, detect_vcs, init_config, protocol};
 use std::path::PathBuf;
 use tracing::debug;
 
@@ -48,28 +48,21 @@ fn main_inner() -> Result<(), MainError> {
             println!("Initialized selfci config at .config/selfci/config.yml");
             println!("Edit this file to configure your CI command.");
         }
-        Commands::Check { root, base, candidate, print_output, jobs } => {
-            cmd::check::check(root, base, candidate, print_output, jobs, cli.vcs.as_deref())?;
-        }
-        Commands::Report { report_command } => {
-            match report_command {
-                ReportCommands::Success => {
-                    debug!(command = "success", "Report command invoked");
-                    // TODO: Implement report success logic
-                }
-                ReportCommands::Failure => {
-                    debug!(command = "failure", "Report command invoked");
-                    // TODO: Implement report failure logic
-                }
-                ReportCommands::Run => {
-                    debug!(command = "run", "Report command invoked");
-                    // TODO: Implement report run logic
-                }
-                ReportCommands::Init => {
-                    debug!(command = "init", "Report command invoked");
-                    // TODO: Implement report init logic
-                }
-            }
+        Commands::Check {
+            root,
+            base,
+            candidate,
+            print_output,
+            jobs,
+        } => {
+            cmd::check::check(
+                root,
+                base,
+                candidate,
+                print_output,
+                jobs,
+                cli.vcs.as_deref(),
+            )?;
         }
         Commands::Step { step_command } => {
             // Get job name from environment
@@ -117,10 +110,7 @@ fn main_inner() -> Result<(), MainError> {
                 }
                 StepCommands::Fail { ignore } => {
                     // Send request to mark step as failed
-                    let request = protocol::JobControlRequest::MarkStepFailed {
-                        job_name,
-                        ignore,
-                    };
+                    let request = protocol::JobControlRequest::MarkStepFailed { job_name, ignore };
                     match protocol::send_request(&socket_path, request) {
                         Ok(protocol::JobControlResponse::StepMarkedFailed) => {
                             // Success - silent exit
@@ -175,22 +165,23 @@ fn main_inner() -> Result<(), MainError> {
                 }
             }
         }
-        Commands::Mq(mq_command) => {
-            match mq_command {
-                opts::MQCommands::Start { base_branch } => {
-                    cmd::mq::start_daemon(base_branch)?;
-                }
-                opts::MQCommands::Add { candidate, no_merge } => {
-                    cmd::mq::add_candidate(candidate, no_merge)?;
-                }
-                opts::MQCommands::List { limit } => {
-                    cmd::mq::list_jobs(limit)?;
-                }
-                opts::MQCommands::Status { job_id } => {
-                    cmd::mq::get_status(job_id)?;
-                }
+        Commands::Mq(mq_command) => match mq_command {
+            opts::MQCommands::Start { base_branch } => {
+                cmd::mq::start_daemon(base_branch)?;
             }
-        }
+            opts::MQCommands::Add {
+                candidate,
+                no_merge,
+            } => {
+                cmd::mq::add_candidate(candidate, no_merge)?;
+            }
+            opts::MQCommands::List { limit } => {
+                cmd::mq::list_jobs(limit)?;
+            }
+            opts::MQCommands::Status { job_id } => {
+                cmd::mq::get_status(job_id)?;
+            }
+        },
     }
 
     Ok(())

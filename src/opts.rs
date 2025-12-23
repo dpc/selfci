@@ -38,17 +38,12 @@ pub enum Commands {
         #[arg(long, short = 'j')]
         jobs: Option<usize>,
     },
-    /// Report commands
-    Report {
-        #[command(subcommand)]
-        report_command: ReportCommands,
-    },
-    /// Step tracking commands (used inside check commands)
+    /// Step reporting commands (used from inside the CI check)
     Step {
         #[command(subcommand)]
         step_command: StepCommands,
     },
-    /// Job control commands (used inside check commands)
+    /// Job control commands (used from inside the CI check)
     Job {
         #[command(subcommand)]
         job_command: JobCommands,
@@ -56,18 +51,6 @@ pub enum Commands {
     /// Merge queue commands
     #[command(subcommand)]
     Mq(MQCommands),
-}
-
-#[derive(Subcommand)]
-pub enum ReportCommands {
-    /// Report success
-    Success,
-    /// Report failure
-    Failure,
-    /// Report run
-    Run,
-    /// Report init
-    Init,
 }
 
 #[derive(Subcommand)]

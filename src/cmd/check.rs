@@ -169,7 +169,12 @@ pub fn run_candidate_check(
 
                 // Always print job status messages in Inline mode
                 if matches!(mode, CheckMode::Inline { .. }) {
-                    println!("[{}/{}] Job started: {}", total_jobs - active_jobs, total_jobs, job_name);
+                    println!(
+                        "[{}/{}] Job started: {}",
+                        total_jobs - active_jobs,
+                        total_jobs,
+                        job_name
+                    );
                 }
             }
             super::worker::JobMessage::Completed(mut outcome) => {
@@ -228,11 +233,19 @@ pub fn run_candidate_check(
                         } else {
                             "no exit code".to_string()
                         };
-                        println!("[{}/{}] Job failed: {} ({}, {:.3}s)",
-                                 jobs_completed, total_jobs, outcome.job_name, failure_reason, duration_secs);
+                        println!(
+                            "[{}/{}] Job failed: {} ({}, {:.3}s)",
+                            jobs_completed,
+                            total_jobs,
+                            outcome.job_name,
+                            failure_reason,
+                            duration_secs
+                        );
                     } else {
-                        println!("[{}/{}] Job passed: {} ({:.3}s)",
-                                 jobs_completed, total_jobs, outcome.job_name, duration_secs);
+                        println!(
+                            "[{}/{}] Job passed: {} ({:.3}s)",
+                            jobs_completed, total_jobs, outcome.job_name, duration_secs
+                        );
                     }
 
                     // Print steps for this job
@@ -255,10 +268,12 @@ pub fn run_candidate_check(
                                 protocol::StepStatus::Running => "⏳",
                             };
 
-                            println!("  {} {} ({:.3}s)",
-                                    status_emoji,
-                                    step_entry.name,
-                                    step_duration.as_secs_f64());
+                            println!(
+                                "  {} {} ({:.3}s)",
+                                status_emoji,
+                                step_entry.name,
+                                step_duration.as_secs_f64()
+                            );
                         }
                     }
                 }
