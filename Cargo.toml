@@ -21,3 +21,11 @@ serde_yaml = "0.9"
 serde_json = "1.0"
 ciborium = "0.2"
 humantime = "2.1"
+
+[profile]
+
+[profile.ci]
+inherits = "dev"
+incremental = false
+debug = "line-tables-only"
+lto = "off"
