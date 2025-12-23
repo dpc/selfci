@@ -1,2 +1,4 @@
 /target
 /.config/selfci/.mq.sock
+/result
+/.direnv
