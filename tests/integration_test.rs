@@ -399,7 +399,7 @@ job:
 
     // Start MQ daemon in background
     let mut mq_daemon = Command::new(selfci_bin)
-        .args(&["mq", "start", "--base-branch", "master"])
+        .args(["mq", "start", "--base-branch", "master"])
         .current_dir(repo_path)
         .env("SELFCI_VCS_FORCE", "git")
         .stdout(Stdio::null())
@@ -423,7 +423,7 @@ job:
     let failing_job_id: u64 = add_output
         .lines()
         .find(|line| line.contains("job ID"))
-        .and_then(|line| line.split(':').last())
+        .and_then(|line| line.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to parse job ID");
 
@@ -488,7 +488,7 @@ job:
     let passing_job_id: u64 = add_output
         .lines()
         .find(|line| line.contains("job ID"))
-        .and_then(|line| line.split(':').last())
+        .and_then(|line| line.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to parse job ID");
 

@@ -17,7 +17,7 @@ struct MQState {
 pub fn start_daemon(base_branch: String) -> Result<(), MainError> {
     // Determine paths
     let root_dir = std::env::current_dir()
-        .map_err(|e| WorkDirError::CreateFailed(e))?;
+        .map_err(WorkDirError::CreateFailed)?;
 
     let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
 
@@ -44,7 +44,7 @@ pub fn start_daemon(base_branch: String) -> Result<(), MainError> {
 
     // Bind socket
     let listener = UnixListener::bind(&socket_path)
-        .map_err(|e| WorkDirError::CreateFailed(e))?;
+        .map_err(WorkDirError::CreateFailed)?;
 
     println!("Merge queue daemon started for base branch: {}", base_branch);
     println!("Socket: {}", socket_path.display());

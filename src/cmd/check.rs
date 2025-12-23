@@ -322,11 +322,11 @@ pub fn check(
     debug!(vcs = ?vcs, root_dir = %root_dir.display(), forced = forced_vcs.is_some(), "Using VCS");
 
     // Use VCS-specific defaults for base and candidate if not provided
-    let base_rev = base.as_deref().unwrap_or_else(|| match vcs {
+    let base_rev = base.as_deref().unwrap_or(match vcs {
         selfci::VCS::Jujutsu => "@-",
         selfci::VCS::Git => "HEAD^",
     });
-    let candidate_rev = candidate.as_deref().unwrap_or_else(|| match vcs {
+    let candidate_rev = candidate.as_deref().unwrap_or(match vcs {
         selfci::VCS::Jujutsu => "@",
         selfci::VCS::Git => "HEAD",
     });

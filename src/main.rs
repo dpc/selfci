@@ -5,7 +5,6 @@ use clap::Parser;
 use opts::{Cli, Commands, JobCommands, StepCommands};
 use selfci::{MainError, detect_vcs, init_config, protocol};
 use std::path::PathBuf;
-use tracing::debug;
 
 fn main() {
     // Initialize tracing subscriber

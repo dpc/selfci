@@ -242,7 +242,7 @@ pub fn control_socket_listener(
                                     let mut steps = job_steps_clone.lock().unwrap();
                                     steps
                                         .entry(job_name.clone())
-                                        .or_insert_with(Vec::new)
+                                        .or_default()
                                         .push(entry);
                                 }
 
