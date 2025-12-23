@@ -1,5 +1,6 @@
 use selfci::{
     CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, get_vcs, protocol, read_config,
+    revision::ResolvedRevision,
 };
 use std::collections::HashMap;
 use std::os::unix::net::UnixListener;
@@ -39,8 +40,8 @@ impl CheckMode {
 /// starting with the "main" job and potentially spawning additional jobs for parallelism.
 pub fn run_candidate_check(
     root_dir: &Path,
-    base_rev: &str,
-    candidate_rev: &str,
+    base_rev: &ResolvedRevision,
+    candidate_rev: &ResolvedRevision,
     parallelism: usize,
     forced_vcs: Option<&str>,
     mode: CheckMode,
@@ -56,7 +57,13 @@ pub fn run_candidate_check(
         base_workdir = %base_workdir.path().display(),
         "Allocated base work directory"
     );
-    debug!(base_rev, candidate_rev, "Running candidate check");
+    debug!(
+        base_user = %base_rev.user,
+        base_commit = %base_rev.commit_id,
+        candidate_user = %candidate_rev.user,
+        candidate_commit = %candidate_rev.commit_id,
+        "Running candidate check"
+    );
 
     // Create a single candidate workdir (shared by all jobs)
     let candidate_workdir = tempfile::tempdir().map_err(WorkDirError::CreateFailed)?;
@@ -66,9 +73,9 @@ pub fn run_candidate_check(
         &vcs,
         root_dir,
         base_workdir.path(),
-        base_rev,
+        &base_rev.commit_id,
         candidate_workdir.path(),
-        candidate_rev,
+        &candidate_rev.commit_id,
     )?;
 
     // Read config from base workdir
@@ -322,14 +329,26 @@ pub fn check(
     debug!(vcs = ?vcs, root_dir = %root_dir.display(), forced = forced_vcs.is_some(), "Using VCS");
 
     // Use VCS-specific defaults for base and candidate if not provided
-    let base_rev = base.as_deref().unwrap_or(match vcs {
+    let base_rev_str = base.as_deref().unwrap_or(match vcs {
         selfci::VCS::Jujutsu => "@-",
         selfci::VCS::Git => "HEAD^",
     });
-    let candidate_rev = candidate.as_deref().unwrap_or(match vcs {
+    let candidate_rev_str = candidate.as_deref().unwrap_or(match vcs {
         selfci::VCS::Jujutsu => "@",
         selfci::VCS::Git => "HEAD",
     });
+
+    // Resolve revisions to immutable IDs
+    let resolved_base = selfci::revision::resolve_revision(&vcs, &root_dir, base_rev_str)?;
+    let resolved_candidate = selfci::revision::resolve_revision(&vcs, &root_dir, candidate_rev_str)?;
+
+    debug!(
+        base_user = %resolved_base.user,
+        base_commit = %resolved_base.commit_id,
+        candidate_user = %resolved_candidate.user,
+        candidate_commit = %resolved_candidate.commit_id,
+        "Resolved revisions"
+    );
 
     // Determine parallelism level
     let parallelism = jobs.unwrap_or_else(|| {
@@ -344,8 +363,8 @@ pub fn check(
     // Run the candidate check using shared implementation
     let result = run_candidate_check(
         &root_dir,
-        base_rev,
-        candidate_rev,
+        &resolved_base,
+        &resolved_candidate,
         parallelism,
         forced_vcs,
         CheckMode::Inline { print_output },

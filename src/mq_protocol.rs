@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use crate::protocol::StepLogEntry;
+use crate::revision::ResolvedRevision;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MQJobStatus {
@@ -17,7 +18,7 @@ pub enum MQJobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MQJobInfo {
     pub id: u64,
-    pub candidate: String,
+    pub candidate: ResolvedRevision,
     pub status: MQJobStatus,
     pub queued_at: SystemTime,
     pub started_at: Option<SystemTime>,

@@ -1,6 +1,6 @@
 mod common;
 
-use selfci::{copy_revisions_to_workdirs, VCS};
+use selfci::{copy_revisions_to_workdirs, VCS, revision};
 use std::fs;
 use tempfile::TempDir;
 
@@ -8,6 +8,12 @@ use tempfile::TempDir;
 fn test_copy_revisions_jujutsu() {
     let repo = common::setup_jj_repo();
     let base_rev = common::get_jj_base_rev(repo.path());
+
+    // Resolve revisions to commit IDs
+    let resolved_base = revision::resolve_revision(&VCS::Jujutsu, repo.path(), &base_rev)
+        .expect("Failed to resolve base revision");
+    let resolved_candidate = revision::resolve_revision(&VCS::Jujutsu, repo.path(), "@")
+        .expect("Failed to resolve candidate revision");
 
     // Create work directories
     let base_workdir = TempDir::new().expect("Failed to create base workdir");
@@ -18,9 +24,9 @@ fn test_copy_revisions_jujutsu() {
         &VCS::Jujutsu,
         repo.path(),
         base_workdir.path(),
-        &base_rev,
+        &resolved_base.commit_id,
         candidate_workdir.path(),
-        "@",
+        &resolved_candidate.commit_id,
     );
     assert!(result.is_ok(), "copy_revisions_to_workdirs failed: {:?}", result);
 
@@ -43,6 +49,12 @@ fn test_copy_revisions_jujutsu() {
 fn test_copy_revisions_git() {
     let repo = common::setup_git_repo();
 
+    // Resolve revisions to commit IDs
+    let resolved_base = revision::resolve_revision(&VCS::Git, repo.path(), "HEAD^")
+        .expect("Failed to resolve base revision");
+    let resolved_candidate = revision::resolve_revision(&VCS::Git, repo.path(), "HEAD")
+        .expect("Failed to resolve candidate revision");
+
     // Create work directories
     let base_workdir = TempDir::new().expect("Failed to create base workdir");
     let candidate_workdir = TempDir::new().expect("Failed to create candidate workdir");
@@ -52,9 +64,9 @@ fn test_copy_revisions_git() {
         &VCS::Git,
         repo.path(),
         base_workdir.path(),
-        "HEAD^",
+        &resolved_base.commit_id,
         candidate_workdir.path(),
-        "HEAD",
+        &resolved_candidate.commit_id,
     );
     assert!(result.is_ok(), "copy_revisions_to_workdirs failed: {:?}", result);
 

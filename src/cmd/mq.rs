@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use tracing::debug;
 
 struct MQState {
+    root_dir: PathBuf,
     base_branch: String,
     next_job_id: u64,
     pending: HashMap<u64, mq_protocol::MQJobInfo>,
@@ -51,6 +52,7 @@ pub fn start_daemon(base_branch: String) -> Result<(), MainError> {
 
     // Initialize state
     let state = Arc::new(Mutex::new(MQState {
+        root_dir: root_dir.clone(),
         base_branch: base_branch.clone(),
         next_job_id: 1,
         pending: HashMap::new(),
@@ -99,6 +101,23 @@ fn handle_request(
         mq_protocol::MQRequest::Hello => mq_protocol::MQResponse::HelloAck,
 
         mq_protocol::MQRequest::AddCandidate { candidate, no_merge } => {
+            // Get root_dir and VCS for resolution
+            let (root_dir, vcs) = {
+                let state = state.lock().unwrap();
+                let root_dir = state.root_dir.clone();
+                let vcs = match get_vcs(&root_dir, None) {
+                    Ok(v) => v,
+                    Err(e) => return mq_protocol::MQResponse::Error(format!("VCS error: {}", e)),
+                };
+                (root_dir, vcs)
+            };
+
+            // Resolve candidate to immutable IDs
+            let resolved_candidate = match selfci::revision::resolve_revision(&vcs, &root_dir, &candidate) {
+                Ok(r) => r,
+                Err(e) => return mq_protocol::MQResponse::Error(format!("Failed to resolve revision '{}': {}", candidate, e)),
+            };
+
             let (job_id, send_result) = {
                 let mut state = state.lock().unwrap();
                 let job_id = state.next_job_id;
@@ -106,7 +125,7 @@ fn handle_request(
 
                 let job = mq_protocol::MQJobInfo {
                     id: job_id,
-                    candidate: candidate.clone(),
+                    candidate: resolved_candidate.clone(),
                     status: mq_protocol::MQJobStatus::Queued,
                     queued_at: SystemTime::now(),
                     started_at: None,
@@ -117,7 +136,13 @@ fn handle_request(
                 };
 
                 state.pending.insert(job_id, job);
-                debug!("Added candidate {} to queue with ID {} (no_merge: {})", candidate, job_id, no_merge);
+                debug!(
+                    candidate_user = %resolved_candidate.user,
+                    candidate_commit = %resolved_candidate.commit_id,
+                    job_id,
+                    no_merge,
+                    "Added candidate to queue"
+                );
 
                 // Send job ID to process_queue
                 let send_result = mq_jobs_sender.send(job_id);
@@ -163,6 +188,15 @@ fn process_queue(
     root_dir: PathBuf,
     mq_jobs_receiver: mpsc::Receiver<u64>,
 ) {
+    // Get VCS once at the start
+    let vcs = match get_vcs(&root_dir, None) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to detect VCS: {}", e);
+            return;
+        }
+    };
+
     loop {
         // Wait for next job ID from channel
         let job_id = match mq_jobs_receiver.recv() {
@@ -189,12 +223,31 @@ fn process_queue(
             }
         };
 
-        debug!("Processing MQ candidate check {}: {}", job_info.id, job_info.candidate);
+        debug!(
+            job_id = job_info.id,
+            candidate_user = %job_info.candidate.user,
+            candidate_commit = %job_info.candidate.commit_id,
+            "Processing MQ candidate check"
+        );
 
         // Get base branch
         let base_branch = {
             let state = state.lock().unwrap();
             state.base_branch.clone()
+        };
+
+        // Resolve base branch to immutable ID
+        let resolved_base = match selfci::revision::resolve_revision(&vcs, &root_dir, &base_branch) {
+            Ok(r) => r,
+            Err(e) => {
+                job_info.status = mq_protocol::MQJobStatus::Failed;
+                job_info.output = format!("Failed to resolve base branch '{}': {}", base_branch, e);
+                job_info.completed_at = Some(SystemTime::now());
+
+                let mut state = state.lock().unwrap();
+                state.completed.push(job_info);
+                continue;
+            }
         };
 
         // Determine parallelism (default to 1 for merge queue)
@@ -205,7 +258,7 @@ fn process_queue(
         // Run the candidate check using the shared implementation
         match super::check::run_candidate_check(
             &root_dir,
-            &base_branch,
+            &resolved_base,
             &job_info.candidate,
             parallelism,
             None,
@@ -262,35 +315,35 @@ fn process_queue(
     }
 }
 
-fn merge_candidate(root_dir: &Path, base_branch: &str, candidate: &str) -> Result<(), String> {
+fn merge_candidate(root_dir: &Path, base_branch: &str, candidate: &selfci::revision::ResolvedRevision) -> Result<(), String> {
     // Detect VCS
     let vcs = get_vcs(root_dir, None)
         .map_err(|e| format!("VCS error: {}", e))?;
 
     match vcs {
         selfci::VCS::Git => {
-            // Git merge
+            // Git merge using immutable commit ID
             cmd!("git", "checkout", base_branch)
                 .dir(root_dir)
                 .run()
                 .map_err(|e| format!("Failed to checkout {}: {}", base_branch, e))?;
 
-            cmd!("git", "merge", "--ff-only", candidate)
+            cmd!("git", "merge", "--ff-only", candidate.commit_id.as_str())
                 .dir(root_dir)
                 .run()
-                .map_err(|e| format!("Failed to merge {}: {}", candidate, e))?;
+                .map_err(|e| format!("Failed to merge {} ({}): {}", candidate.user, candidate.commit_id, e))?;
 
             Ok(())
         }
         selfci::VCS::Jujutsu => {
-            // Jujutsu merge - rebase the candidate onto base branch
-            cmd!("jj", "rebase", "-r", candidate, "-d", base_branch)
+            // Jujutsu merge - rebase the candidate onto base branch using immutable commit ID
+            cmd!("jj", "rebase", "-r", candidate.commit_id.as_str(), "-d", base_branch)
                 .dir(root_dir)
                 .run()
-                .map_err(|e| format!("Failed to rebase {} onto {}: {}", candidate, base_branch, e))?;
+                .map_err(|e| format!("Failed to rebase {} ({}) onto {}: {}", candidate.user, candidate.commit_id, base_branch, e))?;
 
             // Move the base branch bookmark to the rebased commit
-            cmd!("jj", "bookmark", "set", base_branch, "-r", candidate)
+            cmd!("jj", "bookmark", "set", base_branch, "-r", candidate.commit_id.as_str())
                 .dir(root_dir)
                 .run()
                 .map_err(|e| format!("Failed to move bookmark {}: {}", base_branch, e))?;
@@ -364,7 +417,7 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
                     };
 
                     let queued = humantime::format_rfc3339_seconds(job.queued_at);
-                    println!("{:<6} {:<10} {:<40} {:<20}", job.id, status, job.candidate, queued);
+                    println!("{:<6} {:<10} {:<40} {:<20}", job.id, status, job.candidate.user.as_str(), queued);
                 }
             }
             Ok(())
@@ -397,7 +450,7 @@ pub fn get_status(job_id: u64) -> Result<(), MainError> {
     match response {
         mq_protocol::MQResponse::JobStatus { job: Some(job) } => {
             println!("Job ID: {}", job.id);
-            println!("Candidate: {}", job.candidate);
+            println!("Candidate: {} (commit: {})", job.candidate.user, job.candidate.commit_id);
             println!("Status: {:?}", job.status);
             println!("Queued at: {}", humantime::format_rfc3339_seconds(job.queued_at));
 

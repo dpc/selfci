@@ -2,6 +2,7 @@ pub mod config;
 pub mod exit_codes;
 pub mod mq_protocol;
 pub mod protocol;
+pub mod revision;
 
 use duct::cmd;
 use error_set::error_set;
@@ -41,7 +42,12 @@ error_set! {
         CheckFailed,
     }
 
-    MainError := VCSError || WorkDirError || VCSOperationError || ConfigError || CheckError
+    RevisionError := {
+        #[display("Failed to resolve revision")]
+        ResolutionFailed(revision::RevisionError),
+    }
+
+    MainError := VCSError || WorkDirError || VCSOperationError || ConfigError || CheckError || RevisionError
 }
 
 impl MainError {
@@ -55,6 +61,11 @@ impl MainError {
             MainError::ReadFailed(_) => exit_codes::EXIT_CONFIG_READ_FAILED,
             MainError::ParseFailed(_) => exit_codes::EXIT_CONFIG_PARSE_FAILED,
             MainError::CheckFailed => exit_codes::EXIT_CHECK_FAILED,
+            MainError::ResolutionFailed(e) => match e {
+                revision::RevisionError::ResolutionFailed { .. } => exit_codes::EXIT_REVISION_RESOLUTION_FAILED,
+                revision::RevisionError::InvalidCommitId(_) => exit_codes::EXIT_REVISION_INVALID_COMMIT_ID,
+                revision::RevisionError::InvalidOutput { .. } => exit_codes::EXIT_REVISION_INVALID_OUTPUT,
+            },
         }
     }
 }
@@ -99,9 +110,9 @@ pub fn copy_revisions_to_workdirs(
     vcs: &VCS,
     root_dir: &Path,
     base_workdir: &Path,
-    base_revision: &str,
+    base_revision: &revision::CommitId,
     candidate_workdir: &Path,
-    candidate_revision: &str,
+    candidate_revision: &revision::CommitId,
 ) -> Result<(), VCSOperationError> {
     match vcs {
         VCS::Jujutsu => {
@@ -119,19 +130,19 @@ pub fn copy_revisions_to_workdirs(
             let git_dir = git_dir.trim();
 
             // Copy base revision
-            copy_revision_to_workdir_jj(root_dir, base_workdir, base_revision, git_dir)?;
+            copy_revision_to_workdir_jj(root_dir, base_workdir, base_revision.as_str(), git_dir)?;
 
             // Copy candidate revision
-            copy_revision_to_workdir_jj(root_dir, candidate_workdir, candidate_revision, git_dir)?;
+            copy_revision_to_workdir_jj(root_dir, candidate_workdir, candidate_revision.as_str(), git_dir)?;
 
             Ok(())
         }
         VCS::Git => {
             // Copy base revision
-            copy_revision_to_workdir_git(root_dir, base_workdir, base_revision)?;
+            copy_revision_to_workdir_git(root_dir, base_workdir, base_revision.as_str())?;
 
             // Copy candidate revision
-            copy_revision_to_workdir_git(root_dir, candidate_workdir, candidate_revision)?;
+            copy_revision_to_workdir_git(root_dir, candidate_workdir, candidate_revision.as_str())?;
 
             Ok(())
         }
