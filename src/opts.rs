@@ -75,6 +75,14 @@ pub enum JobCommands {
         /// Name of the job
         name: String,
     },
+    /// Wait for a job to complete
+    Wait {
+        /// Name of the job to wait for
+        name: String,
+        /// Wait for successful completion (fail if job fails)
+        #[arg(long)]
+        success: bool,
+    },
 }
 
 #[derive(Subcommand)]

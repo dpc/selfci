@@ -104,6 +104,9 @@ pub fn run_candidate_check(
     // Track used job names
     let used_job_names = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
+    // Track job completions (for job wait)
+    let job_completions = Arc::new(Mutex::new(HashMap::<String, protocol::JobStatus>::new()));
+
     // Spawn worker threads
     for _ in 0..parallelism {
         let jobs_rx = Arc::clone(&jobs_receiver);
@@ -117,6 +120,7 @@ pub fn run_candidate_check(
     // Spawn control socket listener thread
     let job_steps_clone = Arc::clone(&job_steps);
     let used_job_names_clone = Arc::clone(&used_job_names);
+    let job_completions_clone = Arc::clone(&job_completions);
     let jobs_sender_clone = jobs_sender.clone();
     let spawn_context = super::worker::JobSpawnContext {
         base_dir: base_workdir.path().to_path_buf(),
@@ -131,6 +135,7 @@ pub fn run_candidate_check(
             listener,
             job_steps_clone,
             used_job_names_clone,
+            job_completions_clone,
             jobs_sender_clone,
             spawn_context,
         );

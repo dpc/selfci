@@ -168,6 +168,7 @@ pub fn control_socket_listener(
     listener: UnixListener,
     job_steps: Arc<Mutex<HashMap<String, Vec<protocol::StepLogEntry>>>>,
     used_job_names: Arc<Mutex<std::collections::HashSet<String>>>,
+    job_completions: Arc<Mutex<HashMap<String, protocol::JobStatus>>>,
     jobs_sender: mpsc::Sender<RunJobRequest>,
     spawn_context: JobSpawnContext,
 ) {
@@ -176,12 +177,60 @@ pub fn control_socket_listener(
             Ok((mut stream, _)) => {
                 let job_steps_clone = Arc::clone(&job_steps);
                 let used_job_names_clone = Arc::clone(&used_job_names);
+                let job_completions_clone = Arc::clone(&job_completions);
                 let jobs_sender_clone = jobs_sender.clone();
                 let spawn_context_clone = spawn_context.clone();
 
                 std::thread::spawn(move || {
                     if let Ok(request) = protocol::read_request(&mut stream) {
                         match request {
+                            protocol::JobControlRequest::WaitForJob { name } => {
+                                // Check if job name is known
+                                let is_known = {
+                                    let used = used_job_names_clone.lock().unwrap();
+                                    used.contains(&name)
+                                };
+
+                                if !is_known {
+                                    let _ = protocol::write_response(
+                                        &mut stream,
+                                        protocol::JobControlResponse::JobNotFound,
+                                    );
+                                    return;
+                                }
+
+                                // Poll for completion (with timeout)
+                                let timeout = std::time::Duration::from_secs(300); // 5 minutes
+                                let start = std::time::Instant::now();
+                                let poll_interval = std::time::Duration::from_millis(100);
+
+                                loop {
+                                    {
+                                        let completions = job_completions_clone.lock().unwrap();
+                                        if let Some(status) = completions.get(&name) {
+                                            let _ = protocol::write_response(
+                                                &mut stream,
+                                                protocol::JobControlResponse::JobCompleted {
+                                                    status: status.clone(),
+                                                },
+                                            );
+                                            return;
+                                        }
+                                    }
+
+                                    if start.elapsed() > timeout {
+                                        let _ = protocol::write_response(
+                                            &mut stream,
+                                            protocol::JobControlResponse::Error(
+                                                "Timeout waiting for job".to_string(),
+                                            ),
+                                        );
+                                        return;
+                                    }
+
+                                    std::thread::sleep(poll_interval);
+                                }
+                            }
                             protocol::JobControlRequest::StartJob { name } => {
                                 let mut used = used_job_names_clone.lock().unwrap();
                                 if used.contains(&name) {

@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::ConfigError;
 use crate::constants::{CONFIG_DIR_PATH, CONFIG_FILENAME};
 
-const CONFIG_TEMPLATE: &str = include_str!("../share/config-template.yml");
+const CONFIG_TEMPLATE: &str = include_str!("../share/ci-template.yaml");
 
 fn default_command_prefix() -> Vec<String> {
     vec!["bash".to_string(), "-c".to_string()]

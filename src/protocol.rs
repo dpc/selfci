@@ -23,6 +23,14 @@ pub enum JobControlRequest {
     StartJob { name: String },
     LogStep { job_name: String, step_name: String },
     MarkStepFailed { job_name: String, ignore: bool },
+    WaitForJob { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum JobStatus {
+    Running,
+    Succeeded,
+    Failed,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,6 +38,8 @@ pub enum JobControlResponse {
     JobStarted,
     StepLogged,
     StepMarkedFailed,
+    JobCompleted { status: JobStatus },
+    JobNotFound,
     Error(String),
 }
 

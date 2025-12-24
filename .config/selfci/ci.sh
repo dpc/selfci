@@ -47,12 +47,12 @@ function job_cargo() {
     selfci step start "build"
     nix build -L .#ci.workspace
 
-    selfci step start "cargo clippy"
+    selfci step start "clippy"
     if ! nix build -L .#ci.clippy ; then
       selfci step fail
     fi
 
-    selfci step start "cargo nextest run"
+    selfci step start "nextest"
     if ! nix build -L .#ci.tests ; then
       selfci step fail
     fi
@@ -62,6 +62,10 @@ case "$SELFCI_JOB_NAME" in
   main)
     selfci job start "lint"
     selfci job start "cargo"
+
+    # unnecessary, just showing off/dogfooding
+    selfci job wait "lint"
+    selfci job wait "cargo"
     ;;
 
   cargo)

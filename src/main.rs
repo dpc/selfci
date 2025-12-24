@@ -165,6 +165,52 @@ fn main_inner() -> Result<(), MainError> {
                         }
                     }
                 }
+                JobCommands::Wait { name, success } => {
+                    // Send request to wait for job
+                    let request = protocol::JobControlRequest::WaitForJob { name: name.clone() };
+                    match protocol::send_request(&socket_path, request) {
+                        Ok(protocol::JobControlResponse::JobCompleted { status }) => {
+                            match status {
+                                protocol::JobStatus::Succeeded => {
+                                    // Job succeeded - exit 0
+                                    std::process::exit(0);
+                                }
+                                protocol::JobStatus::Failed => {
+                                    if success {
+                                        eprintln!("Job '{}' failed", name);
+                                        std::process::exit(
+                                            selfci::exit_codes::EXIT_JOB_WAIT_FAILED,
+                                        );
+                                    } else {
+                                        // --success not specified, just report status
+                                        std::process::exit(0);
+                                    }
+                                }
+                                protocol::JobStatus::Running => {
+                                    // Shouldn't happen - job should not be reported as completed while running
+                                    eprintln!("Job '{}' is still running", name);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Ok(protocol::JobControlResponse::JobNotFound) => {
+                            eprintln!("Job '{}' not found", name);
+                            std::process::exit(selfci::exit_codes::EXIT_JOB_NOT_FOUND);
+                        }
+                        Ok(protocol::JobControlResponse::Error(err)) => {
+                            eprintln!("Error waiting for job: {}", err);
+                            std::process::exit(1);
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected response from control socket");
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("Error communicating with control socket: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
+                }
             }
         }
         Commands::Mq(mq_command) => match mq_command {
