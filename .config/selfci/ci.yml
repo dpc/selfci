@@ -1,36 +1,3 @@
 job:
-  command: |
-    set -eou pipefail
-
-    case "$SELFCI_JOB_NAME" in
-      main)
-        selfci job start "lint"
-        selfci job start "cargo"
-        ;;
-
-      cargo)
-        selfci step start "cargo check"
-        cargo check
-
-        selfci step start "cargo build"
-        cargo build
-
-        selfci step start "cargo nextest run"
-        cargo nextest run
-        ;;
-
-      lint)
-        selfci step start "Fake step"
-        sleep .1
-        selfci step fail --ignore
-        selfci step start "Fake step2 "
-        sleep .2
-        selfci step fail
-        selfci step start "Fake step 3"
-        sleep .3
-        ;;
-
-      *)
-        echo "Unknown job: $SELFCI_JOB_NAME"
-        exit 1
-    esac
+  command-prefix: [ "nix", "develop", "-c", "bash", "-c" ]
+  command: ./.config/selfci/ci.sh

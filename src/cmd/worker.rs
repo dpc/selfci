@@ -195,7 +195,8 @@ pub fn control_socket_listener(
                                     used.insert(name.clone());
 
                                     // Actually spawn the job by creating a RunJobRequest
-                                    let mut full_command = spawn_context_clone.command_prefix.clone();
+                                    let mut full_command =
+                                        spawn_context_clone.command_prefix.clone();
                                     full_command.push(spawn_context_clone.command.clone());
 
                                     let job_request = RunJobRequest {
@@ -240,10 +241,7 @@ pub fn control_socket_listener(
 
                                 {
                                     let mut steps = job_steps_clone.lock().unwrap();
-                                    steps
-                                        .entry(job_name.clone())
-                                        .or_default()
-                                        .push(entry);
+                                    steps.entry(job_name.clone()).or_default().push(entry);
                                 }
 
                                 let _ = protocol::write_response(

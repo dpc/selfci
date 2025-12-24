@@ -11,6 +11,7 @@ fn default_command_prefix() -> Vec<String> {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobConfig {
     pub command: String,
     #[serde(default = "default_command_prefix", rename = "command-prefix")]
@@ -18,6 +19,7 @@ pub struct JobConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelfCIConfig {
     pub job: JobConfig,
 }

@@ -1,6 +1,6 @@
 use selfci::{
-    CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, get_vcs, protocol, read_config,
-    revision::ResolvedRevision,
+    CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, get_vcs, protocol,
+    read_config, revision::ResolvedRevision,
 };
 use std::collections::HashMap;
 use std::os::unix::net::UnixListener;
@@ -340,7 +340,8 @@ pub fn check(
 
     // Resolve revisions to immutable IDs
     let resolved_base = selfci::revision::resolve_revision(&vcs, &root_dir, base_rev_str)?;
-    let resolved_candidate = selfci::revision::resolve_revision(&vcs, &root_dir, candidate_rev_str)?;
+    let resolved_candidate =
+        selfci::revision::resolve_revision(&vcs, &root_dir, candidate_rev_str)?;
 
     debug!(
         base_user = %resolved_base.user,
