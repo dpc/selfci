@@ -1,20 +1,59 @@
 #!/usr/bin/env bash
 set -eou pipefail
 
-function check_leftover_dbg() {
-  set -euo pipefail
 
-  errors=""
+function job_lint() {
+  # Get zero-terminated list of non-symlink files (reusable)
+  git_ls_files="$(git ls-files -z | while IFS= read -r -d '' file; do
+    [ ! -L "$file" ] && printf '%s\0' "$file"
+  done)"
+
+  selfci step start "check leftover dbg!"
   while IFS= read -r -d '' path; do
     if grep -q 'dbg!(' "$path"; then
       >&2 echo "$path contains dbg! macro"
-      errors=1
+      selfci step fail
     fi
-  done < <(find . -name '*.rs' -print0)
+  done <<< "$git_ls_files"
 
-  if [ -n "$errors" ]; then
-    return 1
+  selfci step start "nixfmt"
+  nix_files=()
+  while IFS= read -r -d '' path; do
+    [[ "$path" == *.nix ]] && nix_files+=("$path")
+  done <<< "$git_ls_files"
+  if [ ${#nix_files[@]} -gt 0 ]; then
+    if ! nixfmt -c "${nix_files[@]}"; then
+      selfci step fail
+    fi
   fi
+
+  selfci step start "cargo fmt"
+  if ! cargo fmt --all --check ; then
+    selfci step fail
+  fi
+}
+
+function job_cargo() {
+    selfci step start "cargo.lock up to date"
+    if ! cargo update --workspace --locked -q; then
+      selfci step fail
+    fi
+
+    selfci step start "cargo check"
+    cargo check
+
+    selfci step start "cargo build"
+    cargo build
+
+    selfci step start "cargo clippy"
+    if ! cargo clippy --locked --offline --workspace --all-targets -- --deny warnings --allow deprecated; then
+      selfci step fail
+    fi
+
+    selfci step start "cargo nextest run"
+    if ! cargo nextest run; then
+      selfci step fail
+    fi
 }
 
 case "$SELFCI_JOB_NAME" in
@@ -24,26 +63,11 @@ case "$SELFCI_JOB_NAME" in
     ;;
 
   cargo)
-    selfci step start "cargo check"
-    cargo check
-
-    selfci step start "cargo build"
-    cargo build
-
-    selfci step start "cargo nextest run"
-    cargo nextest run
+    job_cargo
     ;;
 
   lint)
-    selfci step start "check leftover dbg!"
-    if ! check_leftover_dbg ; then
-      selfci step fail
-    fi
-
-    selfci step start "cargo fmt"
-    if ! cargo fmt --all --check ; then
-      selfci step fail
-    fi
+    job_lint
     ;;
 
   *)
