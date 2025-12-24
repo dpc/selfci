@@ -1,7 +1,27 @@
 use duct::cmd;
+use selfci::constants;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+/// Helper to build config path
+fn config_path(repo_path: &Path) -> PathBuf {
+    let mut path = repo_path.to_path_buf();
+    for segment in constants::CONFIG_DIR_PATH {
+        path.push(segment);
+    }
+    path.push(constants::CONFIG_FILENAME);
+    path
+}
+
+/// Helper to build config dir path
+fn config_dir(repo_path: &Path) -> PathBuf {
+    let mut path = repo_path.to_path_buf();
+    for segment in constants::CONFIG_DIR_PATH {
+        path.push(segment);
+    }
+    path
+}
 
 /// Create a Jujutsu repository with initial commits
 pub fn setup_jj_repo() -> TempDir {
@@ -15,10 +35,10 @@ pub fn setup_jj_repo() -> TempDir {
         .expect("Failed to run jj git init");
 
     // Create config file
-    fs::create_dir_all(repo_path.join(".config").join("selfci"))
+    fs::create_dir_all(config_dir(repo_path))
         .expect("Failed to create config dir");
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         "job:\n  command: echo test\n",
     )
     .expect("Failed to write config");
@@ -32,7 +52,8 @@ pub fn setup_jj_repo() -> TempDir {
         .run()
         .expect("Failed to track base file");
 
-    cmd!("jj", "file", "track", ".config/selfci/config.yml")
+    let config_path_str = format!(".config/selfci/{}", constants::CONFIG_FILENAME);
+    cmd!("jj", "file", "track", &config_path_str)
         .dir(repo_path)
         .run()
         .expect("Failed to track config");
@@ -88,10 +109,10 @@ pub fn setup_git_repo() -> TempDir {
         .expect("Failed to set git user.email");
 
     // Create config file
-    fs::create_dir_all(repo_path.join(".config").join("selfci"))
+    fs::create_dir_all(config_dir(repo_path))
         .expect("Failed to create config dir");
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         "job:\n  command: echo test\n",
     )
     .expect("Failed to write config");

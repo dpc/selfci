@@ -1,7 +1,24 @@
 mod common;
 
 use duct::cmd;
+use selfci::constants;
 use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Helper to build config path
+fn config_path(repo_path: &Path) -> PathBuf {
+    let mut path = repo_path.to_path_buf();
+    for segment in constants::CONFIG_DIR_PATH {
+        path.push(segment);
+    }
+    path.push(constants::CONFIG_FILENAME);
+    path
+}
+
+/// Helper to build config path string for git commands
+fn config_path_str() -> String {
+    format!(".config/selfci/{}", constants::CONFIG_FILENAME)
+}
 
 /// Test basic candidate check execution with simple command
 #[test]
@@ -26,13 +43,13 @@ job:
 "#;
 
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         config_content,
     )
     .expect("Failed to write config");
 
     // Commit the new config as the base
-    cmd!("git", "add", ".config/selfci/config.yml")
+    cmd!("git", "add", &config_path_str())
         .dir(repo_path)
         .run()
         .expect("Failed to git add config");
@@ -108,13 +125,13 @@ job:
 "#, selfci_bin, selfci_bin, selfci_bin, selfci_bin);
 
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         &config_content,
     )
     .expect("Failed to write config");
 
     // Commit the updated config
-    cmd!("git", "add", ".config/selfci/config.yml")
+    cmd!("git", "add", &config_path_str())
         .dir(repo_path)
         .run()
         .expect("Failed to git add config");
@@ -166,12 +183,12 @@ job:
 "#, selfci_bin, selfci_bin, selfci_bin);
 
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         config_content,
     )
     .expect("Failed to write config");
 
-    cmd!("git", "add", ".config/selfci/config.yml")
+    cmd!("git", "add", &config_path_str())
         .dir(repo_path)
         .run()
         .expect("Failed to git add config");
@@ -223,12 +240,12 @@ job:
 "#, selfci_bin, selfci_bin, selfci_bin, selfci_bin);
 
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         config_content,
     )
     .expect("Failed to write config");
 
-    cmd!("git", "add", ".config/selfci/config.yml")
+    cmd!("git", "add", &config_path_str())
         .dir(repo_path)
         .run()
         .expect("Failed to git add config");
@@ -274,12 +291,12 @@ job:
 "#, selfci_bin, selfci_bin);
 
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         config_content,
     )
     .expect("Failed to write config");
 
-    cmd!("jj", "file", "track", ".config/selfci/config.yml")
+    cmd!("jj", "file", "track", &config_path_str())
         .dir(repo_path)
         .run()
         .expect("Failed to track config");
@@ -326,7 +343,7 @@ job:
 "#;
 
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         config_content,
     )
     .expect("Failed to write config");
@@ -581,12 +598,12 @@ job:
 "#, selfci_bin, selfci_bin);
 
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         strict_config,
     )
     .expect("Failed to write strict config");
 
-    cmd!("git", "add", ".config/selfci/config.yml")
+    cmd!("git", "add", &config_path_str())
         .dir(repo_path)
         .run()
         .expect("Failed to git add strict config");
@@ -605,12 +622,12 @@ job:
 "#;
 
     fs::write(
-        repo_path.join(".config").join("selfci").join("config.yml"),
+        config_path(repo_path),
         lax_config,
     )
     .expect("Failed to write lax config");
 
-    cmd!("git", "add", ".config/selfci/config.yml")
+    cmd!("git", "add", &config_path_str())
         .dir(repo_path)
         .run()
         .expect("Failed to git add lax config");

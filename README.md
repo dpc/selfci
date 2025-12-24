@@ -50,7 +50,7 @@ met before the "candidate" "passes the CI".
 
 
 To initialize the CI run `selfci init` in the root directory of
-your project's source code. This will create a `.config/selfci/config.yml` file
+your project's source code. This will create a `.config/selfci/ci.yml` file
 with a template to customize. Yes, I know it's yaml, and yaml ... is meh.
 But it is a single yaml file, with not much structure in it, and
 allows you to quickly delegate all the actual logic to something

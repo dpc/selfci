@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::path::Path;
 
+use crate::constants::{CONFIG_DIR_PATH, CONFIG_FILENAME};
 use crate::ConfigError;
 
 const CONFIG_TEMPLATE: &str = include_str!("../share/config-template.yml");
@@ -22,7 +23,11 @@ pub struct SelfCIConfig {
 }
 
 pub fn read_config(base_workdir: &Path) -> Result<SelfCIConfig, ConfigError> {
-    let config_path = base_workdir.join(".config").join("selfci").join("config.yml");
+    let mut config_path = base_workdir.to_path_buf();
+    for segment in CONFIG_DIR_PATH {
+        config_path.push(segment);
+    }
+    config_path.push(CONFIG_FILENAME);
 
     if !config_path.exists() {
         return Err(ConfigError::NotInitialized);
@@ -38,8 +43,11 @@ pub fn read_config(base_workdir: &Path) -> Result<SelfCIConfig, ConfigError> {
 }
 
 pub fn init_config(root_dir: &Path) -> Result<(), ConfigError> {
-    let config_dir = root_dir.join(".config").join("selfci");
-    let config_path = config_dir.join("config.yml");
+    let mut config_dir = root_dir.to_path_buf();
+    for segment in CONFIG_DIR_PATH {
+        config_dir.push(segment);
+    }
+    let config_path = config_dir.join(CONFIG_FILENAME);
 
     // Create directory if it doesn't exist
     std::fs::create_dir_all(&config_dir)

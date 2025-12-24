@@ -1,4 +1,5 @@
 pub mod config;
+pub mod constants;
 pub mod exit_codes;
 pub mod mq_protocol;
 pub mod protocol;
@@ -29,7 +30,7 @@ error_set! {
     }
 
     ConfigError := {
-        #[display("Not initialized: .config/selfci/config.yml not found")]
+        #[display("Not initialized: .config/selfci/{} not found", constants::CONFIG_FILENAME)]
         NotInitialized,
         #[display("Failed to read config file")]
         ReadFailed(std::io::Error),

@@ -1,4 +1,4 @@
-use selfci::{init_config, read_config};
+use selfci::{constants, init_config, read_config};
 use std::fs;
 use tempfile::TempDir;
 
@@ -12,8 +12,12 @@ fn test_init_config() {
     assert!(result.is_ok(), "init_config failed: {:?}", result);
 
     // Verify config file was created
-    let config_path = root_path.join(".config").join("selfci").join("config.yml");
-    assert!(config_path.exists(), "config.yml should exist");
+    let mut config_path = root_path.to_path_buf();
+    for segment in constants::CONFIG_DIR_PATH {
+        config_path.push(segment);
+    }
+    config_path.push(constants::CONFIG_FILENAME);
+    assert!(config_path.exists(), "{} should exist", constants::CONFIG_FILENAME);
 
     // Verify config file contains the template
     let content = fs::read_to_string(&config_path).expect("Failed to read config");
@@ -31,11 +35,14 @@ fn test_init_config_preserves_existing() {
     let root_path = temp_dir.path();
 
     // Create config directory
-    let config_dir = root_path.join(".config").join("selfci");
+    let mut config_dir = root_path.to_path_buf();
+    for segment in constants::CONFIG_DIR_PATH {
+        config_dir.push(segment);
+    }
     fs::create_dir_all(&config_dir).expect("Failed to create config dir");
 
     // Write custom content to the config
-    let config_path = config_dir.join("config.yml");
+    let config_path = config_dir.join(constants::CONFIG_FILENAME);
     let custom_content = "# Custom config\njob:\n  command: my custom command\n";
     fs::write(&config_path, custom_content).expect("Failed to write custom config");
 

@@ -44,7 +44,7 @@ fn main_inner() -> Result<(), MainError> {
             // Initialize config
             init_config(&root_dir)?;
 
-            println!("Initialized selfci config at .config/selfci/config.yml");
+            println!("Initialized selfci config at .config/selfci/{}", selfci::constants::CONFIG_FILENAME);
             println!("Edit this file to configure your CI command.");
         }
         Commands::Check {
