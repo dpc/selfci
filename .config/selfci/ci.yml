@@ -1,3 +1,2 @@
 job:
-  command-prefix: [ "nix", "develop", "-c" ]
   command: ./.config/selfci/ci.sh

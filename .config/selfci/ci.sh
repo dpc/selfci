@@ -69,7 +69,9 @@ case "$SELFCI_JOB_NAME" in
     ;;
 
   lint)
-    job_lint
+    # use develop shell to ensure all the tools are provided at pinned versions
+    export -f job_lint
+    nix develop -c bash -c "job_lint"
     ;;
 
   *)
