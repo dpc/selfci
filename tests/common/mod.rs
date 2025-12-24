@@ -35,17 +35,12 @@ pub fn setup_jj_repo() -> TempDir {
         .expect("Failed to run jj git init");
 
     // Create config file
-    fs::create_dir_all(config_dir(repo_path))
-        .expect("Failed to create config dir");
-    fs::write(
-        config_path(repo_path),
-        "job:\n  command: echo test\n",
-    )
-    .expect("Failed to write config");
+    fs::create_dir_all(config_dir(repo_path)).expect("Failed to create config dir");
+    fs::write(config_path(repo_path), "job:\n  command: echo test\n")
+        .expect("Failed to write config");
 
     // Create base revision
-    fs::write(repo_path.join("base.txt"), "base content")
-        .expect("Failed to write base file");
+    fs::write(repo_path.join("base.txt"), "base content").expect("Failed to write base file");
 
     cmd!("jj", "file", "track", "base.txt")
         .dir(repo_path)
@@ -109,17 +104,12 @@ pub fn setup_git_repo() -> TempDir {
         .expect("Failed to set git user.email");
 
     // Create config file
-    fs::create_dir_all(config_dir(repo_path))
-        .expect("Failed to create config dir");
-    fs::write(
-        config_path(repo_path),
-        "job:\n  command: echo test\n",
-    )
-    .expect("Failed to write config");
+    fs::create_dir_all(config_dir(repo_path)).expect("Failed to create config dir");
+    fs::write(config_path(repo_path), "job:\n  command: echo test\n")
+        .expect("Failed to write config");
 
     // Create base revision
-    fs::write(repo_path.join("base.txt"), "base content")
-        .expect("Failed to write base file");
+    fs::write(repo_path.join("base.txt"), "base content").expect("Failed to write base file");
 
     cmd!("git", "add", ".")
         .dir(repo_path)

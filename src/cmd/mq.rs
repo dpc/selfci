@@ -17,8 +17,7 @@ struct MQState {
 
 pub fn start_daemon(base_branch: String) -> Result<(), MainError> {
     // Determine paths
-    let root_dir = std::env::current_dir()
-        .map_err(WorkDirError::CreateFailed)?;
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
     let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
 
@@ -39,15 +38,16 @@ pub fn start_daemon(base_branch: String) -> Result<(), MainError> {
 
     // Create socket directory if needed
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(WorkDirError::CreateFailed)?;
+        std::fs::create_dir_all(parent).map_err(WorkDirError::CreateFailed)?;
     }
 
     // Bind socket
-    let listener = UnixListener::bind(&socket_path)
-        .map_err(WorkDirError::CreateFailed)?;
+    let listener = UnixListener::bind(&socket_path).map_err(WorkDirError::CreateFailed)?;
 
-    println!("Merge queue daemon started for base branch: {}", base_branch);
+    println!(
+        "Merge queue daemon started for base branch: {}",
+        base_branch
+    );
     println!("Socket: {}", socket_path.display());
 
     // Initialize state
@@ -100,7 +100,10 @@ fn handle_request(
     match request {
         mq_protocol::MQRequest::Hello => mq_protocol::MQResponse::HelloAck,
 
-        mq_protocol::MQRequest::AddCandidate { candidate, no_merge } => {
+        mq_protocol::MQRequest::AddCandidate {
+            candidate,
+            no_merge,
+        } => {
             // Get root_dir and VCS for resolution
             let (root_dir, vcs) = {
                 let state = state.lock().unwrap();
@@ -113,10 +116,16 @@ fn handle_request(
             };
 
             // Resolve candidate to immutable IDs
-            let resolved_candidate = match selfci::revision::resolve_revision(&vcs, &root_dir, &candidate) {
-                Ok(r) => r,
-                Err(e) => return mq_protocol::MQResponse::Error(format!("Failed to resolve revision '{}': {}", candidate, e)),
-            };
+            let resolved_candidate =
+                match selfci::revision::resolve_revision(&vcs, &root_dir, &candidate) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return mq_protocol::MQResponse::Error(format!(
+                            "Failed to resolve revision '{}': {}",
+                            candidate, e
+                        ));
+                    }
+                };
 
             let (job_id, send_result) = {
                 let mut state = state.lock().unwrap();
@@ -157,7 +166,9 @@ fn handle_request(
 
         mq_protocol::MQRequest::List { limit } => {
             let state = state.lock().unwrap();
-            let mut jobs: Vec<_> = state.pending.values()
+            let mut jobs: Vec<_> = state
+                .pending
+                .values()
                 .chain(state.completed.iter())
                 .cloned()
                 .collect();
@@ -174,7 +185,9 @@ fn handle_request(
 
         mq_protocol::MQRequest::GetStatus { job_id } => {
             let state = state.lock().unwrap();
-            let job = state.pending.get(&job_id)
+            let job = state
+                .pending
+                .get(&job_id)
                 .or_else(|| state.completed.iter().find(|j| j.id == job_id))
                 .cloned();
 
@@ -237,7 +250,8 @@ fn process_queue(
         };
 
         // Resolve base branch to immutable ID
-        let resolved_base = match selfci::revision::resolve_revision(&vcs, &root_dir, &base_branch) {
+        let resolved_base = match selfci::revision::resolve_revision(&vcs, &root_dir, &base_branch)
+        {
             Ok(r) => r,
             Err(e) => {
                 job_info.status = mq_protocol::MQJobStatus::Failed;
@@ -286,10 +300,18 @@ fn process_queue(
 
                     // Merge into base branch if no_merge is false
                     if job_info.no_merge {
-                        debug!("MQ candidate check {} passed (no-merge mode, skipping merge)", job_info.id);
+                        debug!(
+                            "MQ candidate check {} passed (no-merge mode, skipping merge)",
+                            job_info.id
+                        );
                     } else {
-                        debug!("MQ candidate check {} passed, merging into {}", job_info.id, base_branch);
-                        if let Err(e) = merge_candidate(&root_dir, &base_branch, &job_info.candidate) {
+                        debug!(
+                            "MQ candidate check {} passed, merging into {}",
+                            job_info.id, base_branch
+                        );
+                        if let Err(e) =
+                            merge_candidate(&root_dir, &base_branch, &job_info.candidate)
+                        {
                             job_info.output.push_str(&format!("\nMerge failed: {}", e));
                             job_info.status = mq_protocol::MQJobStatus::Failed;
                         }
@@ -315,10 +337,13 @@ fn process_queue(
     }
 }
 
-fn merge_candidate(root_dir: &Path, base_branch: &str, candidate: &selfci::revision::ResolvedRevision) -> Result<(), String> {
+fn merge_candidate(
+    root_dir: &Path,
+    base_branch: &str,
+    candidate: &selfci::revision::ResolvedRevision,
+) -> Result<(), String> {
     // Detect VCS
-    let vcs = get_vcs(root_dir, None)
-        .map_err(|e| format!("VCS error: {}", e))?;
+    let vcs = get_vcs(root_dir, None).map_err(|e| format!("VCS error: {}", e))?;
 
     match vcs {
         selfci::VCS::Git => {
@@ -331,22 +356,46 @@ fn merge_candidate(root_dir: &Path, base_branch: &str, candidate: &selfci::revis
             cmd!("git", "merge", "--ff-only", candidate.commit_id.as_str())
                 .dir(root_dir)
                 .run()
-                .map_err(|e| format!("Failed to merge {} ({}): {}", candidate.user, candidate.commit_id, e))?;
+                .map_err(|e| {
+                    format!(
+                        "Failed to merge {} ({}): {}",
+                        candidate.user, candidate.commit_id, e
+                    )
+                })?;
 
             Ok(())
         }
         selfci::VCS::Jujutsu => {
             // Jujutsu merge - rebase the candidate onto base branch using immutable commit ID
-            cmd!("jj", "rebase", "-r", candidate.commit_id.as_str(), "-d", base_branch)
-                .dir(root_dir)
-                .run()
-                .map_err(|e| format!("Failed to rebase {} ({}) onto {}: {}", candidate.user, candidate.commit_id, base_branch, e))?;
+            cmd!(
+                "jj",
+                "rebase",
+                "-r",
+                candidate.commit_id.as_str(),
+                "-d",
+                base_branch
+            )
+            .dir(root_dir)
+            .run()
+            .map_err(|e| {
+                format!(
+                    "Failed to rebase {} ({}) onto {}: {}",
+                    candidate.user, candidate.commit_id, base_branch, e
+                )
+            })?;
 
             // Move the base branch bookmark to the rebased commit
-            cmd!("jj", "bookmark", "set", base_branch, "-r", candidate.commit_id.as_str())
-                .dir(root_dir)
-                .run()
-                .map_err(|e| format!("Failed to move bookmark {}: {}", base_branch, e))?;
+            cmd!(
+                "jj",
+                "bookmark",
+                "set",
+                base_branch,
+                "-r",
+                candidate.commit_id.as_str()
+            )
+            .dir(root_dir)
+            .run()
+            .map_err(|e| format!("Failed to move bookmark {}: {}", base_branch, e))?;
 
             Ok(())
         }
@@ -354,8 +403,7 @@ fn merge_candidate(root_dir: &Path, base_branch: &str, candidate: &selfci::revis
 }
 
 pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError> {
-    let root_dir = std::env::current_dir()
-        .map_err(WorkDirError::CreateFailed)?;
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
     let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
 
     let response = mq_protocol::send_mq_request(
@@ -370,7 +418,10 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
     match response {
         mq_protocol::MQResponse::CandidateAdded { job_id } => {
             if no_merge {
-                println!("Added to merge queue with job ID: {} (no-merge mode)", job_id);
+                println!(
+                    "Added to merge queue with job ID: {} (no-merge mode)",
+                    job_id
+                );
             } else {
                 println!("Added to merge queue with job ID: {}", job_id);
             }
@@ -388,25 +439,26 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
 }
 
 pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
-    let root_dir = std::env::current_dir()
-        .map_err(WorkDirError::CreateFailed)?;
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
     let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
 
-    let response = mq_protocol::send_mq_request(
-        &socket_path,
-        mq_protocol::MQRequest::List { limit },
-    ).map_err(|e| {
-        eprintln!("Error: {}", e);
-        eprintln!("Is the merge queue daemon running?");
-        MainError::CheckFailed
-    })?;
+    let response =
+        mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::List { limit })
+            .map_err(|e| {
+                eprintln!("Error: {}", e);
+                eprintln!("Is the merge queue daemon running?");
+                MainError::CheckFailed
+            })?;
 
     match response {
         mq_protocol::MQResponse::JobList { jobs } => {
             if jobs.is_empty() {
                 println!("No jobs in queue");
             } else {
-                println!("{:<6} {:<10} {:<40} {:<20}", "ID", "Status", "Candidate", "Queued");
+                println!(
+                    "{:<6} {:<10} {:<40} {:<20}",
+                    "ID", "Status", "Candidate", "Queued"
+                );
                 println!("{}", "-".repeat(80));
                 for job in jobs {
                     let status = match job.status {
@@ -417,7 +469,13 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
                     };
 
                     let queued = humantime::format_rfc3339_seconds(job.queued_at);
-                    println!("{:<6} {:<10} {:<40} {:<20}", job.id, status, job.candidate.user.as_str(), queued);
+                    println!(
+                        "{:<6} {:<10} {:<40} {:<20}",
+                        job.id,
+                        status,
+                        job.candidate.user.as_str(),
+                        queued
+                    );
                 }
             }
             Ok(())
@@ -434,32 +492,42 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
 }
 
 pub fn get_status(job_id: u64) -> Result<(), MainError> {
-    let root_dir = std::env::current_dir()
-        .map_err(WorkDirError::CreateFailed)?;
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
     let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
 
-    let response = mq_protocol::send_mq_request(
-        &socket_path,
-        mq_protocol::MQRequest::GetStatus { job_id },
-    ).map_err(|e| {
-        eprintln!("Error: {}", e);
-        eprintln!("Is the merge queue daemon running?");
-        MainError::CheckFailed
-    })?;
+    let response =
+        mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::GetStatus { job_id })
+            .map_err(|e| {
+                eprintln!("Error: {}", e);
+                eprintln!("Is the merge queue daemon running?");
+                MainError::CheckFailed
+            })?;
 
     match response {
         mq_protocol::MQResponse::JobStatus { job: Some(job) } => {
             println!("Job ID: {}", job.id);
-            println!("Candidate: {} (commit: {})", job.candidate.user, job.candidate.commit_id);
+            println!(
+                "Candidate: {} (commit: {})",
+                job.candidate.user, job.candidate.commit_id
+            );
             println!("Status: {:?}", job.status);
-            println!("Queued at: {}", humantime::format_rfc3339_seconds(job.queued_at));
+            println!(
+                "Queued at: {}",
+                humantime::format_rfc3339_seconds(job.queued_at)
+            );
 
             if let Some(started_at) = job.started_at {
-                println!("Started at: {}", humantime::format_rfc3339_seconds(started_at));
+                println!(
+                    "Started at: {}",
+                    humantime::format_rfc3339_seconds(started_at)
+                );
             }
 
             if let Some(completed_at) = job.completed_at {
-                println!("Completed at: {}", humantime::format_rfc3339_seconds(completed_at));
+                println!(
+                    "Completed at: {}",
+                    humantime::format_rfc3339_seconds(completed_at)
+                );
             }
 
             if !job.output.is_empty() {

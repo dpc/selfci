@@ -1,6 +1,6 @@
 mod common;
 
-use selfci::{detect_vcs, get_vcs, parse_vcs, VCS};
+use selfci::{VCS, detect_vcs, get_vcs, parse_vcs};
 
 #[test]
 fn test_detect_jujutsu() {

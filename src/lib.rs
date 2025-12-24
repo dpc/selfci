@@ -9,7 +9,7 @@ use duct::cmd;
 use error_set::error_set;
 use std::path::Path;
 
-pub use config::{init_config, read_config, SelfCIConfig};
+pub use config::{SelfCIConfig, init_config, read_config};
 
 error_set! {
     VCSError := {
@@ -63,9 +63,15 @@ impl MainError {
             MainError::ParseFailed(_) => exit_codes::EXIT_CONFIG_PARSE_FAILED,
             MainError::CheckFailed => exit_codes::EXIT_CHECK_FAILED,
             MainError::ResolutionFailed(e) => match e {
-                revision::RevisionError::ResolutionFailed { .. } => exit_codes::EXIT_REVISION_RESOLUTION_FAILED,
-                revision::RevisionError::InvalidCommitId(_) => exit_codes::EXIT_REVISION_INVALID_COMMIT_ID,
-                revision::RevisionError::InvalidOutput { .. } => exit_codes::EXIT_REVISION_INVALID_OUTPUT,
+                revision::RevisionError::ResolutionFailed { .. } => {
+                    exit_codes::EXIT_REVISION_RESOLUTION_FAILED
+                }
+                revision::RevisionError::InvalidCommitId(_) => {
+                    exit_codes::EXIT_REVISION_INVALID_COMMIT_ID
+                }
+                revision::RevisionError::InvalidOutput { .. } => {
+                    exit_codes::EXIT_REVISION_INVALID_OUTPUT
+                }
             },
         }
     }
@@ -134,7 +140,12 @@ pub fn copy_revisions_to_workdirs(
             copy_revision_to_workdir_jj(root_dir, base_workdir, base_revision.as_str(), git_dir)?;
 
             // Copy candidate revision
-            copy_revision_to_workdir_jj(root_dir, candidate_workdir, candidate_revision.as_str(), git_dir)?;
+            copy_revision_to_workdir_jj(
+                root_dir,
+                candidate_workdir,
+                candidate_revision.as_str(),
+                git_dir,
+            )?;
 
             Ok(())
         }
@@ -161,10 +172,18 @@ fn copy_revision_to_workdir_jj(
     let bookmark_name = format!("selfci-{:x}", random_suffix);
 
     // Set temporary bookmark at the revision
-    cmd!("jj", "bookmark", "set", "--quiet", "-r", revision, &bookmark_name)
-        .dir(root_dir)
-        .run()
-        .map_err(VCSOperationError::CommandFailed)?;
+    cmd!(
+        "jj",
+        "bookmark",
+        "set",
+        "--quiet",
+        "-r",
+        revision,
+        &bookmark_name
+    )
+    .dir(root_dir)
+    .run()
+    .map_err(VCSOperationError::CommandFailed)?;
 
     // Ensure cleanup happens even on panic or early return
     let root_dir_clone = root_dir.to_path_buf();
@@ -199,4 +218,3 @@ fn copy_revision_to_workdir_git(
 
     Ok(())
 }
-

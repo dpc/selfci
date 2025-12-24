@@ -60,10 +60,7 @@ pub fn read_request<R: Read>(reader: R) -> Result<JobControlRequest, String> {
     ciborium::from_reader(reader).map_err(|e| format!("Failed to decode request: {}", e))
 }
 
-pub fn write_response<W: Write>(
-    mut writer: W,
-    response: JobControlResponse,
-) -> Result<(), String> {
+pub fn write_response<W: Write>(mut writer: W, response: JobControlResponse) -> Result<(), String> {
     ciborium::into_writer(&response, &mut writer)
         .map_err(|e| format!("Failed to encode response: {}", e))
 }

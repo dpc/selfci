@@ -17,12 +17,22 @@ fn test_init_config() {
         config_path.push(segment);
     }
     config_path.push(constants::CONFIG_FILENAME);
-    assert!(config_path.exists(), "{} should exist", constants::CONFIG_FILENAME);
+    assert!(
+        config_path.exists(),
+        "{} should exist",
+        constants::CONFIG_FILENAME
+    );
 
     // Verify config file contains the template
     let content = fs::read_to_string(&config_path).expect("Failed to read config");
-    assert!(content.contains("command:"), "Config should contain 'command:' field");
-    assert!(content.contains("SelfCI Configuration"), "Config should contain header comment");
+    assert!(
+        content.contains("command:"),
+        "Config should contain 'command:' field"
+    );
+    assert!(
+        content.contains("SelfCI Configuration"),
+        "Config should contain header comment"
+    );
 
     // Verify we can parse the config
     let config = read_config(root_path);
@@ -51,9 +61,16 @@ fn test_init_config_preserves_existing() {
     assert!(result.is_ok(), "Second init_config failed: {:?}", result);
 
     // Verify the custom content is preserved (not overwritten)
-    let preserved_content = fs::read_to_string(&config_path).expect("Failed to read config after second init");
-    assert_eq!(preserved_content, custom_content, "Config should not be overwritten");
-    assert!(preserved_content.contains("my custom command"), "Custom command should be preserved");
+    let preserved_content =
+        fs::read_to_string(&config_path).expect("Failed to read config after second init");
+    assert_eq!(
+        preserved_content, custom_content,
+        "Config should not be overwritten"
+    );
+    assert!(
+        preserved_content.contains("my custom command"),
+        "Custom command should be preserved"
+    );
 }
 
 #[test]
@@ -86,7 +103,10 @@ unknown_field: this should cause an error
 
     // Try to read config - should fail
     let result = read_config(root_path);
-    assert!(result.is_err(), "Should fail when config has unknown top-level field");
+    assert!(
+        result.is_err(),
+        "Should fail when config has unknown top-level field"
+    );
 
     // Verify error mentions unknown field
     let err = result.unwrap_err();
@@ -126,7 +146,10 @@ job:
 
     // Try to read config - should fail
     let result = read_config(root_path);
-    assert!(result.is_err(), "Should fail when config has unknown field in job section");
+    assert!(
+        result.is_err(),
+        "Should fail when config has unknown field in job section"
+    );
 
     // Verify error mentions unknown field
     let err = result.unwrap_err();

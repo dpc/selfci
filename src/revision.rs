@@ -92,14 +92,25 @@ pub enum RevisionError {
         source: std::io::Error,
     },
     InvalidCommitId(String),
-    InvalidOutput { vcs: String, output: String },
+    InvalidOutput {
+        vcs: String,
+        output: String,
+    },
 }
 
 impl fmt::Display for RevisionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RevisionError::ResolutionFailed { vcs, revision, source } => {
-                write!(f, "Failed to resolve revision '{}' using {}: {}", revision, vcs, source)
+            RevisionError::ResolutionFailed {
+                vcs,
+                revision,
+                source,
+            } => {
+                write!(
+                    f,
+                    "Failed to resolve revision '{}' using {}: {}",
+                    revision, vcs, source
+                )
             }
             RevisionError::InvalidCommitId(s) => {
                 write!(f, "Invalid commit ID: {} (expected 40-char hex string)", s)
@@ -164,8 +175,8 @@ fn resolve_git_revision(
     let commit_sha = output.trim().to_string();
 
     // Validate it's a full 40-char SHA
-    let commit_id =
-        CommitId::new(commit_sha.clone()).map_err(|_| RevisionError::InvalidCommitId(commit_sha.clone()))?;
+    let commit_id = CommitId::new(commit_sha.clone())
+        .map_err(|_| RevisionError::InvalidCommitId(commit_sha.clone()))?;
 
     // For Git, change_id = commit_id
     let change_id = ChangeId::new(commit_sha);

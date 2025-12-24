@@ -1,6 +1,6 @@
 mod common;
 
-use selfci::{copy_revisions_to_workdirs, VCS, revision};
+use selfci::{VCS, copy_revisions_to_workdirs, revision};
 use std::fs;
 use tempfile::TempDir;
 
@@ -28,7 +28,11 @@ fn test_copy_revisions_jujutsu() {
         candidate_workdir.path(),
         &resolved_candidate.commit_id,
     );
-    assert!(result.is_ok(), "copy_revisions_to_workdirs failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "copy_revisions_to_workdirs failed: {:?}",
+        result
+    );
 
     // Verify base workdir has base.txt
     let base_file = base_workdir.path().join("base.txt");
@@ -39,9 +43,16 @@ fn test_copy_revisions_jujutsu() {
     // Verify candidate workdir has both files
     let candidate_base_file = candidate_workdir.path().join("base.txt");
     let candidate_file = candidate_workdir.path().join("candidate.txt");
-    assert!(candidate_base_file.exists(), "base.txt should exist in candidate workdir");
-    assert!(candidate_file.exists(), "candidate.txt should exist in candidate workdir");
-    let candidate_content = fs::read_to_string(&candidate_file).expect("Failed to read candidate file");
+    assert!(
+        candidate_base_file.exists(),
+        "base.txt should exist in candidate workdir"
+    );
+    assert!(
+        candidate_file.exists(),
+        "candidate.txt should exist in candidate workdir"
+    );
+    let candidate_content =
+        fs::read_to_string(&candidate_file).expect("Failed to read candidate file");
     assert_eq!(candidate_content, "candidate content");
 }
 
@@ -68,7 +79,11 @@ fn test_copy_revisions_git() {
         candidate_workdir.path(),
         &resolved_candidate.commit_id,
     );
-    assert!(result.is_ok(), "copy_revisions_to_workdirs failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "copy_revisions_to_workdirs failed: {:?}",
+        result
+    );
 
     // Verify base workdir has base.txt
     let base_file = base_workdir.path().join("base.txt");
@@ -79,8 +94,15 @@ fn test_copy_revisions_git() {
     // Verify candidate workdir has both files
     let candidate_base_file = candidate_workdir.path().join("base.txt");
     let candidate_file = candidate_workdir.path().join("candidate.txt");
-    assert!(candidate_base_file.exists(), "base.txt should exist in candidate workdir");
-    assert!(candidate_file.exists(), "candidate.txt should exist in candidate workdir");
-    let candidate_content = fs::read_to_string(&candidate_file).expect("Failed to read candidate file");
+    assert!(
+        candidate_base_file.exists(),
+        "base.txt should exist in candidate workdir"
+    );
+    assert!(
+        candidate_file.exists(),
+        "candidate.txt should exist in candidate workdir"
+    );
+    let candidate_content =
+        fs::read_to_string(&candidate_file).expect("Failed to read candidate file");
     assert_eq!(candidate_content, "candidate content");
 }

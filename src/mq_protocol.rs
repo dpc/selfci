@@ -45,10 +45,7 @@ pub enum MQResponse {
     Error(String),
 }
 
-pub fn send_mq_request(
-    socket_path: &Path,
-    request: MQRequest,
-) -> Result<MQResponse, String> {
+pub fn send_mq_request(socket_path: &Path, request: MQRequest) -> Result<MQResponse, String> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|e| format!("Failed to connect to merge queue daemon: {}", e))?;
 
@@ -72,10 +69,7 @@ pub fn read_mq_request<R: Read>(reader: R) -> Result<MQRequest, String> {
     ciborium::from_reader(reader).map_err(|e| format!("Failed to decode request: {}", e))
 }
 
-pub fn write_mq_response<W: Write>(
-    mut writer: W,
-    response: MQResponse,
-) -> Result<(), String> {
+pub fn write_mq_response<W: Write>(mut writer: W, response: MQResponse) -> Result<(), String> {
     ciborium::into_writer(&response, &mut writer)
         .map_err(|e| format!("Failed to encode response: {}", e))
 }
