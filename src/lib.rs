@@ -162,42 +162,22 @@ pub fn copy_revisions_to_workdirs(
 }
 
 fn copy_revision_to_workdir_jj(
-    root_dir: &Path,
+    _root_dir: &Path,
     workdir: &Path,
     revision: &str,
     git_dir: &str,
 ) -> Result<(), VCSOperationError> {
-    // Generate a random temporary bookmark name
-    let random_suffix: u64 = rand::random();
-    let bookmark_name = format!("selfci-{:x}", random_suffix);
+    // Clone the git repository into the workdir
+    cmd!("git", "clone", "--quiet", git_dir, ".")
+        .dir(workdir)
+        .stderr_null()
+        .run()
+        .map_err(VCSOperationError::CommandFailed)?;
 
-    // Set temporary bookmark at the revision
-    cmd!(
-        "jj",
-        "bookmark",
-        "set",
-        "--quiet",
-        "-r",
-        revision,
-        &bookmark_name
-    )
-    .dir(root_dir)
-    .run()
-    .map_err(VCSOperationError::CommandFailed)?;
-
-    // Ensure cleanup happens even on panic or early return
-    let root_dir_clone = root_dir.to_path_buf();
-    let bookmark_name_clone = bookmark_name.clone();
-    let _guard = scopeguard::guard((), move |_| {
-        let _ = cmd!("jj", "bookmark", "forget", "--quiet", &bookmark_name_clone)
-            .dir(&root_dir_clone)
-            .run();
-    });
-
-    // Use git archive to export the revision and pipe to tar for extraction
-    cmd!("git", "archive", "--format=tar", &bookmark_name)
-        .env("GIT_DIR", git_dir)
-        .pipe(cmd!("tar", "x").dir(workdir))
+    // Checkout the specific revision (commit ID), suppressing all output
+    cmd!("git", "checkout", "--quiet", revision)
+        .dir(workdir)
+        .stderr_null()
         .run()
         .map_err(VCSOperationError::CommandFailed)?;
 
@@ -209,10 +189,17 @@ fn copy_revision_to_workdir_git(
     workdir: &Path,
     revision: &str,
 ) -> Result<(), VCSOperationError> {
-    // Use git archive to export the revision and pipe to tar for extraction
-    cmd!("git", "archive", "--format=tar", revision)
-        .dir(root_dir)
-        .pipe(cmd!("tar", "x").dir(workdir))
+    // Clone the git repository into the workdir
+    cmd!("git", "clone", "--quiet", root_dir, ".")
+        .dir(workdir)
+        .stderr_null()
+        .run()
+        .map_err(VCSOperationError::CommandFailed)?;
+
+    // Checkout the specific revision (commit ID), suppressing all output
+    cmd!("git", "checkout", "--quiet", revision)
+        .dir(workdir)
+        .stderr_null()
         .run()
         .map_err(VCSOperationError::CommandFailed)?;
 
