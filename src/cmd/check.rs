@@ -204,11 +204,6 @@ pub fn run_candidate_check(
                     }
                 }
 
-                // Collect output from all jobs
-                if !outcome.output.is_empty() {
-                    all_outputs.push_str(&outcome.output);
-                }
-
                 // Collect steps from all jobs
                 all_steps.extend(outcome.steps.clone());
 
@@ -225,6 +220,31 @@ pub fn run_candidate_check(
 
                 if job_failed {
                     any_job_failed = true;
+                }
+
+                // Record job completion status for wait command
+                {
+                    let mut completions = job_completions.lock().unwrap();
+                    completions.insert(
+                        outcome.job_name.clone(),
+                        if job_failed {
+                            protocol::JobStatus::Failed
+                        } else {
+                            protocol::JobStatus::Succeeded
+                        },
+                    );
+                }
+
+                // Collect output based on mode:
+                // - MergeQueue: collect all output (for user visibility)
+                // - Inline: only collect output from failed jobs (to avoid noise)
+                let should_collect_output = match mode {
+                    CheckMode::MergeQueue => true,
+                    CheckMode::Inline { .. } => job_failed,
+                };
+
+                if should_collect_output && !outcome.output.is_empty() {
+                    all_outputs.push_str(&outcome.output);
                 }
 
                 // Print job completion status and steps in Inline mode
