@@ -33,25 +33,27 @@ function job_lint() {
   fi
 }
 
+# check the things involving cargo
+# We're using Nix + crane + flakebox,
+# this gives us caching between different
+# builds and decent isolation.
 function job_cargo() {
     selfci step start "cargo.lock up to date"
     if ! cargo update --workspace --locked -q; then
       selfci step fail
     fi
 
-    selfci step start "cargo check"
-    cargo check
-
-    selfci step start "cargo build"
-    cargo build
+    # there's not point continuing if we can't build
+    selfci step start "build"
+    nix build -L .#ci.workspace
 
     selfci step start "cargo clippy"
-    if ! cargo clippy --locked --offline --workspace --all-targets -- --deny warnings --allow deprecated; then
+    if ! nix build -L .#ci.clippy ; then
       selfci step fail
     fi
 
     selfci step start "cargo nextest run"
-    if ! cargo nextest run; then
+    if ! nix build -L .#ci.tests ; then
       selfci step fail
     fi
 }

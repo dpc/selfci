@@ -85,9 +85,24 @@
                   }
                 );
               in
-              {
+              rec {
+                workspaceDeps = craneLib.buildWorkspaceDepsOnly { };
+
+                workspace = craneLib.buildWorkspace {
+                  cargoArtifacts = workspaceDeps;
+                };
+
                 selfci = craneLib.buildPackage {
+                  cargoArtifacts = workspace;
                   meta.mainProgram = "selfci";
+                };
+
+                tests = craneLib.cargoNextest {
+                  cargoArtifacts = workspace;
+                };
+
+                clippy = craneLib.cargoClippy {
+                  cargoArtifacts = workspace;
                 };
               }
             );

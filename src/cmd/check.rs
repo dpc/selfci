@@ -57,6 +57,7 @@ pub fn run_candidate_check(
         base_workdir = %base_workdir.path().display(),
         "Allocated base work directory"
     );
+
     debug!(
         base_user = %base_rev.user,
         base_commit = %base_rev.commit_id,
