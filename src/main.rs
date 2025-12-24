@@ -226,7 +226,7 @@ fn main_inner() -> Result<(), MainError> {
             opts::MQCommands::List { limit } => {
                 cmd::mq::list_jobs(limit)?;
             }
-            opts::MQCommands::Status { job_id } => {
+            opts::MQCommands::Status { run_id: job_id } => {
                 cmd::mq::get_status(job_id)?;
             }
         },

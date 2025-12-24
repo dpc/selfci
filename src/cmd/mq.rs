@@ -11,7 +11,8 @@ struct MQState {
     root_dir: PathBuf,
     base_branch: String,
     next_job_id: u64,
-    pending: HashMap<u64, mq_protocol::MQJobInfo>,
+    queued: HashMap<u64, mq_protocol::MQJobInfo>,
+    active: HashMap<u64, mq_protocol::MQJobInfo>,
     completed: Vec<mq_protocol::MQJobInfo>,
 }
 
@@ -55,7 +56,8 @@ pub fn start_daemon(base_branch: String) -> Result<(), MainError> {
         root_dir: root_dir.clone(),
         base_branch: base_branch.clone(),
         next_job_id: 1,
-        pending: HashMap::new(),
+        queued: HashMap::new(),
+        active: HashMap::new(),
         completed: Vec::new(),
     }));
 
@@ -144,7 +146,7 @@ fn handle_request(
                     no_merge,
                 };
 
-                state.pending.insert(job_id, job);
+                state.queued.insert(job_id, job);
                 debug!(
                     candidate_user = %resolved_candidate.user,
                     candidate_commit = %resolved_candidate.commit_id,
@@ -167,8 +169,9 @@ fn handle_request(
         mq_protocol::MQRequest::List { limit } => {
             let state = state.lock().unwrap();
             let mut jobs: Vec<_> = state
-                .pending
+                .queued
                 .values()
+                .chain(state.active.values())
                 .chain(state.completed.iter())
                 .cloned()
                 .collect();
@@ -186,10 +189,11 @@ fn handle_request(
         mq_protocol::MQRequest::GetStatus { job_id } => {
             let state = state.lock().unwrap();
             let job = state
-                .pending
+                .queued
                 .get(&job_id)
-                .or_else(|| state.completed.iter().find(|j| j.id == job_id))
-                .cloned();
+                .or_else(|| state.active.get(&job_id))
+                .cloned()
+                .or_else(|| state.completed.iter().find(|j| j.id == job_id).cloned());
 
             mq_protocol::MQResponse::JobStatus { job }
         }
@@ -220,17 +224,18 @@ fn process_queue(
             }
         };
 
-        // Get job info from pending and mark as Running
+        // Move job from queued to active
         let mut job_info = {
             let mut state = state.lock().unwrap();
-            match state.pending.remove(&job_id) {
+            match state.queued.remove(&job_id) {
                 Some(mut job) => {
                     job.status = mq_protocol::MQJobStatus::Running;
                     job.started_at = Some(SystemTime::now());
+                    state.active.insert(job_id, job.clone());
                     job
                 }
                 None => {
-                    debug!("Job {} not found in pending map", job_id);
+                    debug!("Job {} not found in queued map", job_id);
                     continue;
                 }
             }
@@ -259,6 +264,7 @@ fn process_queue(
                 job_info.completed_at = Some(SystemTime::now());
 
                 let mut state = state.lock().unwrap();
+                state.active.remove(&job_id);
                 state.completed.push(job_info);
                 continue;
             }
@@ -329,9 +335,10 @@ fn process_queue(
             }
         }
 
-        // Move job to completed
+        // Move job from active to completed
         {
             let mut state = state.lock().unwrap();
+            state.active.remove(&job_id);
             state.completed.push(job_info);
         }
     }
@@ -505,7 +512,7 @@ pub fn get_status(job_id: u64) -> Result<(), MainError> {
 
     match response {
         mq_protocol::MQResponse::JobStatus { job: Some(job) } => {
-            println!("Job ID: {}", job.id);
+            println!("Run ID: {}", job.id);
             println!(
                 "Candidate: {} (commit: {})",
                 job.candidate.user, job.candidate.commit_id

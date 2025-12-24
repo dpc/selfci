@@ -111,7 +111,7 @@ pub enum MQCommands {
     },
     /// Get status of a specific job
     Status {
-        /// Job ID to query
-        job_id: u64,
+        /// Run ID to query
+        run_id: u64,
     },
 }
