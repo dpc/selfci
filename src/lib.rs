@@ -1,5 +1,6 @@
 pub mod config;
 pub mod constants;
+pub mod envs;
 pub mod exit_codes;
 pub mod mq_protocol;
 pub mod protocol;

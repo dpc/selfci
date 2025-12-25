@@ -3,20 +3,20 @@ mod opts;
 
 use clap::Parser;
 use opts::{Cli, Commands, JobCommands, StepCommands};
-use selfci::{MainError, detect_vcs, init_config, protocol};
+use selfci::{MainError, detect_vcs, envs, init_config, protocol};
 use std::path::PathBuf;
 
 fn main() {
     // Initialize tracing subscriber
     // Use SELFCI_LOG env var (falls back to INFO level if not set)
-    let env_filter = std::env::var("SELFCI_LOG")
+    let env_filter = std::env::var(envs::SELFCI_LOG)
         .ok()
         .and_then(|v| v.parse::<tracing_subscriber::EnvFilter>().ok())
         .unwrap_or_else(|| tracing_subscriber::EnvFilter::new("info"));
 
     // Use compact format by default (level + message only)
     // Set SELFCI_LOG_FULL for verbose format with timestamps and targets
-    let use_full_format = std::env::var("SELFCI_LOG_FULL").is_ok();
+    let use_full_format = std::env::var(envs::SELFCI_LOG_FULL).is_ok();
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -81,19 +81,19 @@ fn main_inner() -> Result<(), MainError> {
         }
         Commands::Step { step_command } => {
             // Get job name from environment
-            let job_name = match std::env::var("SELFCI_JOB_NAME") {
+            let job_name = match std::env::var(envs::SELFCI_JOB_NAME) {
                 Ok(name) => name,
                 Err(_) => {
-                    eprintln!("Error: SELFCI_JOB_NAME environment variable not set");
+                    eprintln!("Error: {} environment variable not set", envs::SELFCI_JOB_NAME);
                     std::process::exit(1);
                 }
             };
 
             // Get socket path from environment
-            let socket_path = match std::env::var("SELFCI_JOB_SOCK_PATH") {
+            let socket_path = match std::env::var(envs::SELFCI_JOB_SOCK_PATH) {
                 Ok(path) => PathBuf::from(path),
                 Err(_) => {
-                    eprintln!("Error: SELFCI_JOB_SOCK_PATH environment variable not set");
+                    eprintln!("Error: {} environment variable not set", envs::SELFCI_JOB_SOCK_PATH);
                     std::process::exit(1);
                 }
             };
@@ -148,10 +148,10 @@ fn main_inner() -> Result<(), MainError> {
         }
         Commands::Job { job_command } => {
             // Get socket path from environment
-            let socket_path = match std::env::var("SELFCI_JOB_SOCK_PATH") {
+            let socket_path = match std::env::var(envs::SELFCI_JOB_SOCK_PATH) {
                 Ok(path) => PathBuf::from(path),
                 Err(_) => {
-                    eprintln!("Error: SELFCI_JOB_SOCK_PATH environment variable not set");
+                    eprintln!("Error: {} environment variable not set", envs::SELFCI_JOB_SOCK_PATH);
                     std::process::exit(1);
                 }
             };

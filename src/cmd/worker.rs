@@ -1,5 +1,5 @@
 use duct::cmd;
-use selfci::{CheckError, protocol};
+use selfci::{CheckError, envs, protocol};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
@@ -92,10 +92,10 @@ pub fn job_worker(
         // Execute the job command
         let handle = match cmd(&job.job_full_command[0], &job.job_full_command[1..])
             .dir(&job.candidate_dir)
-            .env("SELFCI_BASE_DIR", &job.base_dir)
-            .env("SELFCI_CANDIDATE_DIR", &job.candidate_dir)
-            .env("SELFCI_JOB_NAME", &job.job_name)
-            .env("SELFCI_JOB_SOCK_PATH", &job.socket_path)
+            .env(envs::SELFCI_BASE_DIR, &job.base_dir)
+            .env(envs::SELFCI_CANDIDATE_DIR, &job.candidate_dir)
+            .env(envs::SELFCI_JOB_NAME, &job.job_name)
+            .env(envs::SELFCI_JOB_SOCK_PATH, &job.socket_path)
             .stderr_to_stdout()
             .unchecked()
             .reader()

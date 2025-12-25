@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use selfci::envs;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -6,7 +7,7 @@ use std::path::PathBuf;
 #[command(about = "A minimalistic local-first unix-philosophy-abiding CI", long_about = None)]
 pub struct Cli {
     /// Force VCS type (jj or git)
-    #[arg(long, global = true, env = "SELFCI_VCS_FORCE", value_name = "VCS")]
+    #[arg(long, global = true, env = envs::SELFCI_VCS_FORCE, value_name = "VCS")]
     pub vcs: Option<String>,
 
     #[command(subcommand)]
@@ -20,7 +21,7 @@ pub enum Commands {
     /// Run CI checks
     Check {
         /// Root working directory
-        #[arg(long, env = "SELFCI_ROOT_DIR")]
+        #[arg(long, env = envs::SELFCI_ROOT_DIR)]
         root: Option<String>,
 
         /// Base revision to compare against
