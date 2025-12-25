@@ -214,8 +214,12 @@ fn main_inner() -> Result<(), MainError> {
             }
         }
         Commands::Mq(mq_command) => match mq_command {
-            opts::MQCommands::Start { base_branch } => {
-                cmd::mq::start_daemon(base_branch)?;
+            opts::MQCommands::Start {
+                base_branch,
+                foreground,
+                log_file,
+            } => {
+                cmd::mq::start_daemon(base_branch, foreground, log_file)?;
             }
             opts::MQCommands::Add {
                 candidate,
@@ -228,6 +232,9 @@ fn main_inner() -> Result<(), MainError> {
             }
             opts::MQCommands::Status { run_id: job_id } => {
                 cmd::mq::get_status(job_id)?;
+            }
+            opts::MQCommands::Stop => {
+                cmd::mq::stop_daemon()?;
             }
         },
     }

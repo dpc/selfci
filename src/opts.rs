@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "selfci")]
@@ -92,6 +93,14 @@ pub enum MQCommands {
         /// Base branch to merge into
         #[arg(long)]
         base_branch: String,
+
+        /// Run in foreground (don't daemonize)
+        #[arg(long, short = 'f')]
+        foreground: bool,
+
+        /// Override log file location
+        #[arg(long)]
+        log_file: Option<PathBuf>,
     },
     /// Add a candidate to the merge queue
     Add {
@@ -113,4 +122,6 @@ pub enum MQCommands {
         /// Run ID to query
         run_id: u64,
     },
+    /// Stop the merge queue daemon
+    Stop,
 }

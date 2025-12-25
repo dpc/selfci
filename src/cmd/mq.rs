@@ -1,6 +1,10 @@
+use daemonize::Daemonize;
 use duct::cmd;
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
 use selfci::{MainError, WorkDirError, get_vcs, mq_protocol, protocol};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -16,40 +20,139 @@ struct MQState {
     completed: Vec<mq_protocol::MQJobInfo>,
 }
 
-pub fn start_daemon(base_branch: String) -> Result<(), MainError> {
+#[derive(Debug)]
+enum DaemonStatus {
+    Running(u32), // PID
+    NotRunning,
+    Stale, // PID file exists but process dead
+}
+
+fn is_daemon_running(pid_path: &Path, socket_path: &Path) -> DaemonStatus {
+    // Check if PID file exists
+    if !pid_path.exists() {
+        return DaemonStatus::NotRunning;
+    }
+
+    // Read PID from file
+    let pid = match std::fs::read_to_string(pid_path) {
+        Ok(content) => match content.trim().parse::<u32>() {
+            Ok(p) => p,
+            Err(_) => return DaemonStatus::Stale,
+        },
+        Err(_) => return DaemonStatus::Stale,
+    };
+
+    // Check if process with that PID exists by sending signal 0
+    let process_exists = signal::kill(Pid::from_raw(pid as i32), None).is_ok();
+
+    if !process_exists {
+        return DaemonStatus::Stale;
+    }
+
+    // Double-check with socket
+    if socket_path.exists() {
+        match mq_protocol::send_mq_request(socket_path, mq_protocol::MQRequest::Hello) {
+            Ok(mq_protocol::MQResponse::HelloAck) => DaemonStatus::Running(pid),
+            _ => DaemonStatus::Stale,
+        }
+    } else {
+        DaemonStatus::Stale
+    }
+}
+
+pub fn start_daemon(
+    base_branch: String,
+    foreground: bool,
+    log_file: Option<PathBuf>,
+) -> Result<(), MainError> {
     // Determine paths
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
-    let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
+    let config_dir = root_dir.join(".config").join("selfci");
+    let socket_path = config_dir.join(".mq.sock");
+    let pid_path = config_dir.join(".mq.pid");
+    let default_log_path = config_dir.join("mq.log");
+    let log_path = log_file.unwrap_or(default_log_path);
+
+    // Create config directory if needed
+    std::fs::create_dir_all(&config_dir).map_err(WorkDirError::CreateFailed)?;
 
     // Check if daemon is already running
-    if socket_path.exists() {
-        match mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Hello) {
-            Ok(mq_protocol::MQResponse::HelloAck) => {
-                println!("Merge queue daemon is already running");
-                return Ok(());
-            }
-            _ => {
-                // Socket exists but daemon not responding, remove it
-                debug!("Removing stale socket");
+    match is_daemon_running(&pid_path, &socket_path) {
+        DaemonStatus::Running(pid) => {
+            println!("Merge queue daemon is already running (PID: {})", pid);
+            println!("Use 'selfci mq stop' to stop it");
+            return Ok(());
+        }
+        DaemonStatus::Stale => {
+            // Clean up stale files
+            debug!("Removing stale PID and socket files");
+            std::fs::remove_file(&pid_path).ok();
+            std::fs::remove_file(&socket_path).ok();
+        }
+        DaemonStatus::NotRunning => {
+            // Clean up any stale socket
+            if socket_path.exists() {
                 std::fs::remove_file(&socket_path).ok();
             }
         }
     }
 
-    // Create socket directory if needed
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).map_err(WorkDirError::CreateFailed)?;
+    // Daemonize if not in foreground mode
+    if !foreground {
+        // Print startup message before forking (so parent process shows it to user)
+        println!("Merge queue daemon starting in background...");
+        println!("Base branch: {}", base_branch);
+        println!("Socket: {}", socket_path.display());
+        println!("Log: {}", log_path.display());
+
+        // Create log file
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(WorkDirError::CreateFailed)?;
+
+        let daemonize = Daemonize::new()
+            .pid_file(&pid_path)
+            .working_directory(&root_dir)
+            .stdout(log_file.try_clone().map_err(WorkDirError::CreateFailed)?)
+            .stderr(log_file)
+            .umask(0o027);
+
+        match daemonize.start() {
+            Ok(_) => {
+                // We're now in the daemon process (child)
+                // Parent has exited and shown message to user
+                debug!("Daemon process started");
+            }
+            Err(e) => {
+                eprintln!("Failed to daemonize: {}", e);
+                return Err(MainError::CheckFailed);
+            }
+        }
+    } else {
+        // In foreground mode, write our PID manually for consistency
+        let pid = std::process::id();
+        std::fs::write(&pid_path, pid.to_string()).map_err(WorkDirError::CreateFailed)?;
+
+        println!(
+            "Merge queue daemon started for base branch: {}",
+            base_branch
+        );
+        println!("Socket: {}", socket_path.display());
     }
+
+    // Set up cleanup on exit
+    let socket_path_cleanup = socket_path.clone();
+    let pid_path_cleanup = pid_path.clone();
+    let _guard = scopeguard::guard((), move |_| {
+        std::fs::remove_file(&socket_path_cleanup).ok();
+        std::fs::remove_file(&pid_path_cleanup).ok();
+    });
 
     // Bind socket
     let listener = UnixListener::bind(&socket_path).map_err(WorkDirError::CreateFailed)?;
-
-    println!(
-        "Merge queue daemon started for base branch: {}",
-        base_branch
-    );
-    println!("Socket: {}", socket_path.display());
 
     // Initialize state
     let state = Arc::new(Mutex::new(MQState {
@@ -555,6 +658,69 @@ pub fn get_status(job_id: u64) -> Result<(), MainError> {
         _ => {
             eprintln!("Unexpected response from daemon");
             Err(MainError::CheckFailed)
+        }
+    }
+}
+
+pub fn stop_daemon() -> Result<(), MainError> {
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
+    let config_dir = root_dir.join(".config").join("selfci");
+    let pid_path = config_dir.join(".mq.pid");
+    let socket_path = config_dir.join(".mq.sock");
+
+    // Check daemon status
+    match is_daemon_running(&pid_path, &socket_path) {
+        DaemonStatus::NotRunning => {
+            eprintln!("Merge queue daemon is not running");
+            Err(MainError::CheckFailed)
+        }
+        DaemonStatus::Stale => {
+            println!("Cleaning up stale daemon files");
+            std::fs::remove_file(&pid_path).ok();
+            std::fs::remove_file(&socket_path).ok();
+            Ok(())
+        }
+        DaemonStatus::Running(pid) => {
+            println!("Stopping merge queue daemon (PID: {})...", pid);
+
+            // Send SIGTERM for graceful shutdown
+            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_err() {
+                eprintln!("Failed to send SIGTERM to process {}", pid);
+                return Err(MainError::CheckFailed);
+            }
+
+            // Wait for process to exit (with timeout)
+            let timeout = std::time::Duration::from_secs(30);
+            let start = std::time::Instant::now();
+
+            loop {
+                // Check if process still exists
+                let exists = signal::kill(Pid::from_raw(pid as i32), None).is_ok();
+
+                if !exists {
+                    println!("Daemon stopped successfully");
+                    // Clean up files
+                    std::fs::remove_file(&pid_path).ok();
+                    std::fs::remove_file(&socket_path).ok();
+                    return Ok(());
+                }
+
+                if start.elapsed() > timeout {
+                    eprintln!("Timeout waiting for daemon to stop, sending SIGKILL...");
+                    // Send SIGKILL as last resort
+                    let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+
+                    // Clean up files
+                    std::fs::remove_file(&pid_path).ok();
+                    std::fs::remove_file(&socket_path).ok();
+
+                    println!("Daemon forcefully terminated");
+                    return Ok(());
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
     }
 }
