@@ -13,3 +13,8 @@ job:
   # Can be used to change the shell, or disable shell interpretation
   # of `command` altogether.
   # command-prefix: ["bash", "-c"]
+
+# Merge queue configuration (optional)
+# mq:
+#   # Default base branch for merge queue
+#   base-branch: main

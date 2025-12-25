@@ -91,9 +91,9 @@ pub enum JobCommands {
 pub enum MQCommands {
     /// Start the merge queue daemon
     Start {
-        /// Base branch to merge into
+        /// Base branch to merge into (defaults to mq.base-branch from config)
         #[arg(long)]
-        base_branch: String,
+        base_branch: Option<String>,
 
         /// Run in foreground (don't daemonize)
         #[arg(long, short = 'f')]

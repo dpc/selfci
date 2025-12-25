@@ -18,10 +18,18 @@ pub struct JobConfig {
     pub command_prefix: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MQConfig {
+    #[serde(rename = "base-branch")]
+    pub base_branch: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfCIConfig {
     pub job: JobConfig,
+    pub mq: Option<MQConfig>,
 }
 
 pub fn read_config(base_workdir: &Path) -> Result<SelfCIConfig, ConfigError> {

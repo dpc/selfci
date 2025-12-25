@@ -1,2 +1,5 @@
 job:
   command: ./.config/selfci/ci.sh
+
+mq:
+  base-branch: main

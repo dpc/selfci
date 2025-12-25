@@ -116,11 +116,40 @@ struct MQState {
 }
 
 pub fn start_daemon(
-    base_branch: String,
+    base_branch: Option<String>,
     foreground: bool,
     log_file: Option<PathBuf>,
 ) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
+
+    // Read config to get default base branch if not specified
+    let base_branch = if let Some(branch) = base_branch {
+        branch
+    } else {
+        // Try to read config from current directory
+        match selfci::config::read_config(&root_dir) {
+            Ok(config) => {
+                if let Some(mq_config) = config.mq {
+                    if let Some(branch) = mq_config.base_branch {
+                        branch
+                    } else {
+                        eprintln!("Error: --base-branch not specified and mq.base-branch not set in config");
+                        eprintln!("Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml");
+                        return Err(MainError::CheckFailed);
+                    }
+                } else {
+                    eprintln!("Error: --base-branch not specified and mq.base-branch not set in config");
+                    eprintln!("Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml");
+                    return Err(MainError::CheckFailed);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: --base-branch not specified and failed to read config: {}", e);
+                eprintln!("Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml");
+                return Err(MainError::CheckFailed);
+            }
+        }
+    };
 
     // Check if daemon is already running for this project
     if let Some(existing_dir) = get_daemon_runtime_dir(&root_dir)?
