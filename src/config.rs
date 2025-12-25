@@ -18,11 +18,24 @@ pub struct JobConfig {
     pub command_prefix: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeStyle {
+    Rebase,
+    Merge,
+}
+
+fn default_merge_style() -> MergeStyle {
+    MergeStyle::Rebase
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MQConfig {
     #[serde(rename = "base-branch")]
     pub base_branch: Option<String>,
+    #[serde(rename = "merge-style", default = "default_merge_style")]
+    pub merge_style: MergeStyle,
 }
 
 #[derive(Debug, Deserialize)]

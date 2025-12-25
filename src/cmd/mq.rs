@@ -133,19 +133,32 @@ pub fn start_daemon(
                     if let Some(branch) = mq_config.base_branch {
                         branch
                     } else {
-                        eprintln!("Error: --base-branch not specified and mq.base-branch not set in config");
-                        eprintln!("Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml");
+                        eprintln!(
+                            "Error: --base-branch not specified and mq.base-branch not set in config"
+                        );
+                        eprintln!(
+                            "Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml"
+                        );
                         return Err(MainError::CheckFailed);
                     }
                 } else {
-                    eprintln!("Error: --base-branch not specified and mq.base-branch not set in config");
-                    eprintln!("Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml");
+                    eprintln!(
+                        "Error: --base-branch not specified and mq.base-branch not set in config"
+                    );
+                    eprintln!(
+                        "Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml"
+                    );
                     return Err(MainError::CheckFailed);
                 }
             }
             Err(e) => {
-                eprintln!("Error: --base-branch not specified and failed to read config: {}", e);
-                eprintln!("Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml");
+                eprintln!(
+                    "Error: --base-branch not specified and failed to read config: {}",
+                    e
+                );
+                eprintln!(
+                    "Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml"
+                );
                 return Err(MainError::CheckFailed);
             }
         }
@@ -589,11 +602,18 @@ fn process_queue(
                             "MQ candidate check {} passed, merging into {}",
                             job_info.id, base_branch
                         );
-                        if let Err(e) =
-                            merge_candidate(&root_dir, &base_branch, &job_info.candidate)
-                        {
-                            job_info.output.push_str(&format!("\nMerge failed: {}", e));
-                            job_info.status = mq_protocol::MQJobStatus::Failed;
+                        match merge_candidate(&root_dir, &base_branch, &job_info.candidate) {
+                            Ok(merge_log) => {
+                                // Append merge output with separator
+                                job_info.output.push_str("\n\n=== Merge Output ===\n");
+                                job_info.output.push_str(&merge_log);
+                            }
+                            Err(e) => {
+                                job_info
+                                    .output
+                                    .push_str(&format!("\n\n=== Merge Failed ===\n{}", e));
+                                job_info.status = mq_protocol::MQJobStatus::Failed;
+                            }
                         }
                     }
                 } else {
@@ -622,63 +642,293 @@ fn merge_candidate(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
-) -> Result<(), String> {
-    // Detect VCS
+) -> Result<String, String> {
+    let mut merge_log = String::new();
+    // Detect VCS first (needed to read config from base branch)
     let vcs = get_vcs(root_dir, None).map_err(|e| format!("VCS error: {}", e))?;
 
-    match vcs {
-        selfci::VCS::Git => {
-            // Git merge using immutable commit ID
-            cmd!("git", "checkout", base_branch)
-                .dir(root_dir)
-                .run()
-                .map_err(|e| format!("Failed to checkout {}: {}", base_branch, e))?;
+    // Read config from base branch (not from local working directory which could have uncommitted changes)
+    let config_path = {
+        let mut path = selfci::constants::CONFIG_DIR_PATH.join("/");
+        path.push('/');
+        path.push_str(selfci::constants::CONFIG_FILENAME);
+        path
+    };
 
-            cmd!("git", "merge", "--ff-only", candidate.commit_id.as_str())
+    let config_content = match vcs {
+        selfci::VCS::Git => {
+            // Read config from base branch using git show
+            cmd!("git", "show", format!("{}:{}", base_branch, config_path))
                 .dir(root_dir)
-                .run()
+                .read()
+                .map_err(|e| format!("Failed to read config from {}: {}", base_branch, e))?
+        }
+        selfci::VCS::Jujutsu => {
+            // Read config from base branch using jj cat
+            cmd!("jj", "cat", "-r", base_branch, &config_path)
+                .dir(root_dir)
+                .read()
+                .map_err(|e| format!("Failed to read config from {}: {}", base_branch, e))?
+        }
+    };
+
+    let config: selfci::config::SelfCIConfig = serde_yaml::from_str(&config_content)
+        .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+    let merge_style = config
+        .mq
+        .as_ref()
+        .map(|mq| &mq.merge_style)
+        .unwrap_or(&selfci::config::MergeStyle::Rebase);
+
+    match (vcs, merge_style) {
+        (selfci::VCS::Git, selfci::config::MergeStyle::Rebase) => {
+            // Git rebase mode - use a temporary worktree to avoid touching user's working directory
+            let temp_worktree =
+                root_dir.join(format!(".git/selfci-worktree-{}", candidate.commit_id));
+
+            merge_log.push_str(&format!(
+                "Git rebase mode: rebasing {} onto {}\n",
+                candidate.commit_id, base_branch
+            ));
+
+            // Create temporary worktree in detached HEAD state at candidate commit
+            merge_log.push_str(&format!(
+                "Creating temporary worktree at {}\n",
+                temp_worktree.display()
+            ));
+            let output = cmd!(
+                "git",
+                "worktree",
+                "add",
+                "--detach",
+                &temp_worktree,
+                candidate.commit_id.as_str()
+            )
+            .dir(root_dir)
+            .stderr_to_stdout()
+            .read()
+            .map_err(|e| format!("Failed to create temporary worktree: {}", e))?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // Ensure cleanup on any exit path
+            let cleanup = scopeguard::guard((), |_| {
+                let _ = cmd!("git", "worktree", "remove", "--force", &temp_worktree)
+                    .dir(root_dir)
+                    .run();
+            });
+
+            // In the worktree, rebase onto base_branch
+            merge_log.push_str(&format!("Rebasing onto {}\n", base_branch));
+            let output = cmd!("git", "rebase", base_branch)
+                .dir(&temp_worktree)
+                .stderr_to_stdout()
+                .read()
+                .map_err(|e| {
+                    format!(
+                        "Failed to rebase {} ({}) onto {}: {}",
+                        candidate.user, candidate.commit_id, base_branch, e
+                    )
+                })?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // Update base_branch to point to the rebased commits (HEAD in worktree)
+            merge_log.push_str(&format!("Updating {} to rebased commits\n", base_branch));
+            let output = cmd!(
+                "git",
+                "update-ref",
+                format!("refs/heads/{}", base_branch),
+                "HEAD"
+            )
+            .dir(&temp_worktree)
+            .stderr_to_stdout()
+            .read()
+            .map_err(|e| format!("Failed to update {}: {}", base_branch, e))?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // Cleanup is handled by scopeguard
+            drop(cleanup);
+
+            merge_log.push_str("Rebase completed successfully\n");
+            Ok(merge_log)
+        }
+        (selfci::VCS::Git, selfci::config::MergeStyle::Merge) => {
+            // Git merge mode - use a temporary worktree to avoid touching user's working directory
+            let temp_worktree =
+                root_dir.join(format!(".git/selfci-worktree-{}", candidate.commit_id));
+
+            merge_log.push_str(&format!(
+                "Git merge mode: merging {} into {}\n",
+                candidate.commit_id, base_branch
+            ));
+
+            // Create temporary worktree in detached HEAD state at base branch
+            merge_log.push_str(&format!(
+                "Creating temporary worktree at {}\n",
+                temp_worktree.display()
+            ));
+            let output = cmd!(
+                "git",
+                "worktree",
+                "add",
+                "--detach",
+                &temp_worktree,
+                base_branch
+            )
+            .dir(root_dir)
+            .stderr_to_stdout()
+            .read()
+            .map_err(|e| format!("Failed to create temporary worktree: {}", e))?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // Ensure cleanup on any exit path
+            let cleanup = scopeguard::guard((), |_| {
+                let _ = cmd!("git", "worktree", "remove", "--force", &temp_worktree)
+                    .dir(root_dir)
+                    .run();
+            });
+
+            // In the worktree, merge candidate
+            merge_log.push_str(&format!("Merging {} with --no-ff\n", candidate.commit_id));
+            let output = cmd!("git", "merge", "--no-ff", candidate.commit_id.as_str())
+                .dir(&temp_worktree)
+                .stderr_to_stdout()
+                .read()
                 .map_err(|e| {
                     format!(
                         "Failed to merge {} ({}): {}",
                         candidate.user, candidate.commit_id, e
                     )
                 })?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
 
-            Ok(())
+            // Update base_branch to point to the merge commit (HEAD in worktree)
+            merge_log.push_str(&format!("Updating {} to merge commit\n", base_branch));
+            let output = cmd!(
+                "git",
+                "update-ref",
+                format!("refs/heads/{}", base_branch),
+                "HEAD"
+            )
+            .dir(&temp_worktree)
+            .stderr_to_stdout()
+            .read()
+            .map_err(|e| format!("Failed to update {}: {}", base_branch, e))?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // Cleanup is handled by scopeguard
+            drop(cleanup);
+
+            merge_log.push_str("Merge completed successfully\n");
+            Ok(merge_log)
         }
-        selfci::VCS::Jujutsu => {
-            // Jujutsu merge - rebase the candidate onto base branch using immutable commit ID
-            cmd!(
+        (selfci::VCS::Jujutsu, selfci::config::MergeStyle::Rebase) => {
+            // Jujutsu rebase mode - rebase candidate branch onto base branch
+            merge_log.push_str(&format!(
+                "Jujutsu rebase mode: rebasing {} onto {}\n",
+                candidate.commit_id, base_branch
+            ));
+
+            // Get the change ID of the candidate (stable across rebases)
+            merge_log.push_str("Getting change ID of candidate\n");
+            let change_id = cmd!(
+                "jj",
+                "log",
+                "-r",
+                candidate.commit_id.as_str(),
+                "-T",
+                "change_id",
+                "--no-graph",
+                "--color=never"
+            )
+            .dir(root_dir)
+            .read()
+            .map_err(|e| format!("Failed to get change ID: {}", e))?
+            .trim()
+            .to_string();
+            merge_log.push_str(&format!("Change ID: {}\n", change_id));
+
+            // Use -b (branch) to rebase the candidate and its ancestors (that aren't in base) onto base branch
+            merge_log.push_str("Rebasing branch\n");
+            let output = cmd!(
                 "jj",
                 "rebase",
-                "-r",
+                "-b",
                 candidate.commit_id.as_str(),
                 "-d",
                 base_branch
             )
             .dir(root_dir)
-            .run()
+            .stderr_to_stdout()
+            .read()
             .map_err(|e| {
                 format!(
                     "Failed to rebase {} ({}) onto {}: {}",
                     candidate.user, candidate.commit_id, base_branch, e
                 )
             })?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
 
-            // Move the base branch bookmark to the rebased commit
-            cmd!(
-                "jj",
-                "bookmark",
-                "set",
-                base_branch,
-                "-r",
-                candidate.commit_id.as_str()
-            )
-            .dir(root_dir)
-            .run()
-            .map_err(|e| format!("Failed to move bookmark {}: {}", base_branch, e))?;
+            // Move the base branch bookmark to the rebased commit using change ID
+            merge_log.push_str(&format!(
+                "Moving {} bookmark to rebased commit\n",
+                base_branch
+            ));
+            let output = cmd!("jj", "bookmark", "set", base_branch, "-r", &change_id)
+                .dir(root_dir)
+                .stderr_to_stdout()
+                .read()
+                .map_err(|e| format!("Failed to move bookmark {}: {}", base_branch, e))?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
 
-            Ok(())
+            merge_log.push_str("Rebase completed successfully\n");
+            Ok(merge_log)
+        }
+        (selfci::VCS::Jujutsu, selfci::config::MergeStyle::Merge) => {
+            // Jujutsu merge mode - create a merge commit
+            merge_log.push_str(&format!(
+                "Jujutsu merge mode: creating merge commit of {} into {}\n",
+                candidate.commit_id, base_branch
+            ));
+
+            // Create a new merge commit with both base and candidate as parents
+            merge_log.push_str("Creating merge commit\n");
+            let output = cmd!("jj", "new", base_branch, candidate.commit_id.as_str())
+                .dir(root_dir)
+                .stderr_to_stdout()
+                .read()
+                .map_err(|e| {
+                    format!(
+                        "Failed to create merge commit of {} ({}) into {}: {}",
+                        candidate.user, candidate.commit_id, base_branch, e
+                    )
+                })?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // Move the base branch bookmark to this new merge commit
+            merge_log.push_str(&format!(
+                "Moving {} bookmark to merge commit\n",
+                base_branch
+            ));
+            let output = cmd!("jj", "bookmark", "set", base_branch, "-r", "@")
+                .dir(root_dir)
+                .stderr_to_stdout()
+                .read()
+                .map_err(|e| format!("Failed to move bookmark {}: {}", base_branch, e))?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            merge_log.push_str("Merge completed successfully\n");
+            Ok(merge_log)
         }
     }
 }

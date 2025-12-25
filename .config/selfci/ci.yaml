@@ -3,3 +3,4 @@ job:
 
 mq:
   base-branch: main
+  merge-style: rebase
