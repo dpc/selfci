@@ -385,7 +385,7 @@ pub fn check(
     });
     debug!(parallelism, "Using parallelism level");
 
-    println!("Running jobs with parallelism {}", parallelism);
+    debug!("Running jobs with parallelism {}", parallelism);
 
     // Run the candidate check using shared implementation
     let result = run_candidate_check(
@@ -403,7 +403,10 @@ pub fn check(
     }
 
     // Print total time
-    println!("\nTotal time: {:.3}s", result.duration.as_secs_f64());
+    debug!(
+        secs = format!("{:.3}s", result.duration.as_secs_f64()),
+        "Total time",
+    );
 
     // Check if any step failed (non-ignored)
     let has_step_failure = result

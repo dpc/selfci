@@ -8,12 +8,25 @@ use std::path::PathBuf;
 
 fn main() {
     // Initialize tracing subscriber
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+    // Use SELFCI_LOG env var (falls back to INFO level if not set)
+    let env_filter = std::env::var("SELFCI_LOG")
+        .ok()
+        .and_then(|v| v.parse::<tracing_subscriber::EnvFilter>().ok())
+        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new("info"));
+
+    // Use compact format by default (level + message only)
+    // Set SELFCI_LOG_FULL for verbose format with timestamps and targets
+    let use_full_format = std::env::var("SELFCI_LOG_FULL").is_ok();
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr);
+
+    if use_full_format {
+        subscriber.init();
+    } else {
+        subscriber.without_time().with_target(false).init();
+    }
 
     if let Err(err) = main_inner() {
         // Print the error chain
