@@ -504,7 +504,7 @@ job:
     thread::sleep(Duration::from_millis(500));
 
     // Add failing commit to queue
-    let add_output = cmd!(selfci_bin, "mq", "add", "--candidate", &failing_commit)
+    let add_output = cmd!(selfci_bin, "mq", "add", &failing_commit)
         .dir(repo_path)
         .env("SELFCI_VCS_FORCE", "git")
         .read()
@@ -573,7 +573,7 @@ job:
     );
 
     // Now add passing commit to queue
-    let add_output = cmd!(selfci_bin, "mq", "add", "--candidate", &passing_commit)
+    let add_output = cmd!(selfci_bin, "mq", "add", &passing_commit)
         .dir(repo_path)
         .env("SELFCI_VCS_FORCE", "git")
         .read()
@@ -725,12 +725,20 @@ job:
     // If config is correctly read from base, it should FAIL (strict config)
     // If config is incorrectly read from candidate, it would PASS (lax config)
     let selfci_bin = env!("CARGO_BIN_EXE_selfci");
-    let output = cmd!(selfci_bin, "check", "--root", repo_path, "--print-output")
-        .env("SELFCI_VCS_FORCE", "git")
-        .stderr_to_stdout()
-        .unchecked()
-        .read()
-        .expect("Failed to run selfci check");
+    let output = cmd!(
+        selfci_bin,
+        "check",
+        "--root",
+        repo_path,
+        "--base",
+        "HEAD^",
+        "--print-output"
+    )
+    .env("SELFCI_VCS_FORCE", "git")
+    .stderr_to_stdout()
+    .unchecked()
+    .read()
+    .expect("Failed to run selfci check");
 
     println!("Output:\n{}", output);
 

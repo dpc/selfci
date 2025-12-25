@@ -96,7 +96,6 @@ pub enum MQCommands {
     /// Add a candidate to the merge queue
     Add {
         /// Candidate revision to check and merge
-        #[arg(long)]
         candidate: String,
 
         /// Don't merge even if check passes (dry-run)

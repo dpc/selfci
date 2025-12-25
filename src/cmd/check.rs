@@ -356,8 +356,8 @@ pub fn check(
 
     // Use VCS-specific defaults for base and candidate if not provided
     let base_rev_str = base.as_deref().unwrap_or(match vcs {
-        selfci::VCS::Jujutsu => "@-",
-        selfci::VCS::Git => "HEAD^",
+        selfci::VCS::Jujutsu => "@",
+        selfci::VCS::Git => "HEAD",
     });
     let candidate_rev_str = candidate.as_deref().unwrap_or(match vcs {
         selfci::VCS::Jujutsu => "@",
