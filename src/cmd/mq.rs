@@ -1,8 +1,7 @@
-use daemonize::Daemonize;
 use duct::cmd;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use selfci::{MainError, WorkDirError, get_vcs, mq_protocol, protocol};
+use selfci::{MainError, WorkDirError, envs, get_vcs, mq_protocol, protocol};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::os::unix::net::UnixListener;
@@ -10,6 +9,102 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::SystemTime;
 use tracing::debug;
+
+/// Get the selfci runtime directory for auto-discovery mode
+/// Returns $XDG_RUNTIME_DIR/selfci, falling back to /tmp/selfci-{uid}
+fn get_selfci_runtime_dir() -> Result<PathBuf, MainError> {
+    let base = dirs::runtime_dir().unwrap_or_else(|| {
+        // Fallback to /tmp/selfci-{uid} if XDG_RUNTIME_DIR not available
+        let uid = nix::unistd::getuid();
+        PathBuf::from(format!("/tmp/selfci-{}", uid))
+    });
+
+    Ok(base.join("selfci"))
+}
+
+/// Get the daemon runtime directory for this project
+/// Returns explicit dir if SELFCI_MQ_RUNTIME_DIR is set, otherwise searches for daemon
+fn get_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>, MainError> {
+    // Mode 1: Explicit runtime directory
+    if let Ok(explicit_dir) = std::env::var(envs::SELFCI_MQ_RUNTIME_DIR) {
+        let dir = PathBuf::from(explicit_dir);
+
+        // Verify it's for our project (if initialized)
+        let dir_file = dir.join("mq.dir");
+        if dir_file.exists() {
+            let stored_root =
+                std::fs::read_to_string(&dir_file).map_err(WorkDirError::CreateFailed)?;
+            if Path::new(stored_root.trim()) == project_root {
+                return Ok(Some(dir));
+            } else {
+                return Ok(None); // Wrong project
+            }
+        } else {
+            // Not initialized yet, return the directory
+            return Ok(Some(dir));
+        }
+    }
+
+    // Mode 2: Auto-discovery - scan PID directories
+    let runtime_dir = get_selfci_runtime_dir()?;
+    if !runtime_dir.exists() {
+        return Ok(None);
+    }
+
+    for entry in std::fs::read_dir(&runtime_dir).map_err(WorkDirError::CreateFailed)? {
+        let entry = entry.map_err(WorkDirError::CreateFailed)?;
+        let pid_dir = entry.path();
+
+        // Read mq.dir to check project match
+        let dir_file = pid_dir.join("mq.dir");
+        let stored_root = match std::fs::read_to_string(&dir_file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        if Path::new(stored_root.trim()) == project_root {
+            // Found matching project, verify daemon is running
+            if verify_daemon_running(&pid_dir)? {
+                return Ok(Some(pid_dir));
+            } else {
+                // Stale daemon, clean up
+                std::fs::remove_dir_all(&pid_dir).ok();
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Verify a daemon is actually running in the given directory
+fn verify_daemon_running(daemon_dir: &Path) -> Result<bool, MainError> {
+    let pid_file = daemon_dir.join("mq.pid");
+    let socket_path = daemon_dir.join("mq.sock");
+
+    // Read PID
+    let pid = match std::fs::read_to_string(&pid_file) {
+        Ok(content) => match content.trim().parse::<u32>() {
+            Ok(p) => p,
+            Err(_) => return Ok(false),
+        },
+        Err(_) => return Ok(false),
+    };
+
+    // Check process exists
+    if signal::kill(Pid::from_raw(pid as i32), None).is_err() {
+        return Ok(false);
+    }
+
+    // Verify socket responds
+    if socket_path.exists() {
+        match mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Hello) {
+            Ok(mq_protocol::MQResponse::HelloAck) => Ok(true),
+            _ => Ok(false),
+        }
+    } else {
+        Ok(false)
+    }
+}
 
 struct MQState {
     root_dir: PathBuf,
@@ -20,138 +115,185 @@ struct MQState {
     completed: Vec<mq_protocol::MQJobInfo>,
 }
 
-#[derive(Debug)]
-enum DaemonStatus {
-    Running(u32), // PID
-    NotRunning,
-    Stale, // PID file exists but process dead
-}
-
-fn is_daemon_running(pid_path: &Path, socket_path: &Path) -> DaemonStatus {
-    // Check if PID file exists
-    if !pid_path.exists() {
-        return DaemonStatus::NotRunning;
-    }
-
-    // Read PID from file
-    let pid = match std::fs::read_to_string(pid_path) {
-        Ok(content) => match content.trim().parse::<u32>() {
-            Ok(p) => p,
-            Err(_) => return DaemonStatus::Stale,
-        },
-        Err(_) => return DaemonStatus::Stale,
-    };
-
-    // Check if process with that PID exists by sending signal 0
-    let process_exists = signal::kill(Pid::from_raw(pid as i32), None).is_ok();
-
-    if !process_exists {
-        return DaemonStatus::Stale;
-    }
-
-    // Double-check with socket
-    if socket_path.exists() {
-        match mq_protocol::send_mq_request(socket_path, mq_protocol::MQRequest::Hello) {
-            Ok(mq_protocol::MQResponse::HelloAck) => DaemonStatus::Running(pid),
-            _ => DaemonStatus::Stale,
-        }
-    } else {
-        DaemonStatus::Stale
-    }
-}
-
 pub fn start_daemon(
     base_branch: String,
     foreground: bool,
     log_file: Option<PathBuf>,
 ) -> Result<(), MainError> {
-    // Determine paths
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
-    let config_dir = root_dir.join(".config").join("selfci");
-    let socket_path = config_dir.join(".mq.sock");
-    let pid_path = config_dir.join(".mq.pid");
-    let default_log_path = config_dir.join("mq.log");
-    let log_path = log_file.unwrap_or(default_log_path);
-
-    // Create config directory if needed
-    std::fs::create_dir_all(&config_dir).map_err(WorkDirError::CreateFailed)?;
-
-    // Check if daemon is already running
-    match is_daemon_running(&pid_path, &socket_path) {
-        DaemonStatus::Running(pid) => {
-            println!("Merge queue daemon is already running (PID: {})", pid);
-            println!("Use 'selfci mq stop' to stop it");
-            return Ok(());
-        }
-        DaemonStatus::Stale => {
-            // Clean up stale files
-            debug!("Removing stale PID and socket files");
-            std::fs::remove_file(&pid_path).ok();
-            std::fs::remove_file(&socket_path).ok();
-        }
-        DaemonStatus::NotRunning => {
-            // Clean up any stale socket
-            if socket_path.exists() {
-                std::fs::remove_file(&socket_path).ok();
-            }
-        }
+    // Check if daemon is already running for this project
+    if let Some(existing_dir) = get_daemon_runtime_dir(&root_dir)?
+        && let Ok(pid_str) = std::fs::read_to_string(existing_dir.join("mq.pid"))
+        && let Ok(pid) = pid_str.trim().parse::<u32>()
+    {
+        println!("Merge queue daemon is already running (PID: {})", pid);
+        println!("Runtime directory: {}", existing_dir.display());
+        println!("Use 'selfci mq stop' to stop it");
+        return Ok(());
     }
 
-    // Daemonize if not in foreground mode
-    if !foreground {
-        // Print startup message before forking (so parent process shows it to user)
-        println!("Merge queue daemon starting in background...");
+    // Determine initial daemon directory (may be modified after fork in background mode)
+    let daemon_dir_initial = if let Ok(explicit_dir) = std::env::var(envs::SELFCI_MQ_RUNTIME_DIR) {
+        // Mode 1: Use explicit directory
+        PathBuf::from(explicit_dir)
+    } else {
+        // Mode 2: Will determine after getting PID
+        PathBuf::new()
+    };
+
+    // Daemonize and set up runtime directory
+    let daemon_dir = if !foreground {
+        // Background mode - manual fork so we can report PID back to parent
         println!("Base branch: {}", base_branch);
-        println!("Socket: {}", socket_path.display());
-        println!("Log: {}", log_path.display());
 
-        // Create log file
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map_err(WorkDirError::CreateFailed)?;
+        // Create a pipe for the child to send its info back to the parent
+        let (reader, mut writer) =
+            std::os::unix::net::UnixStream::pair().map_err(WorkDirError::CreateFailed)?;
 
-        let daemonize = Daemonize::new()
-            .pid_file(&pid_path)
-            .working_directory(&root_dir)
-            .stdout(log_file.try_clone().map_err(WorkDirError::CreateFailed)?)
-            .stderr(log_file)
-            .umask(0o027);
+        // Manual fork (instead of using daemonize crate, so parent can read from pipe)
+        use nix::unistd::{ForkResult, fork, setsid};
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child: _ }) => {
+                // Parent process - read daemon dir from pipe and print it
+                drop(writer);
 
-        match daemonize.start() {
-            Ok(_) => {
-                // We're now in the daemon process (child)
-                // Parent has exited and shown message to user
-                debug!("Daemon process started");
+                use std::io::BufRead;
+                let reader = std::io::BufReader::new(reader);
+                if let Ok(Some(daemon_dir)) = reader.lines().next().transpose() {
+                    println!("Runtime directory: {}", daemon_dir);
+                }
+                std::process::exit(0);
             }
             Err(e) => {
-                eprintln!("Failed to daemonize: {}", e);
+                eprintln!("Failed to fork: {}", e);
                 return Err(MainError::CheckFailed);
+            }
+            Ok(ForkResult::Child) => {
+                // Child process - become session leader and continue as daemon
+                drop(reader);
+
+                // Become session leader
+                setsid().map_err(|_| {
+                    WorkDirError::CreateFailed(std::io::Error::other(
+                        "Failed to become session leader",
+                    ))
+                })?;
+
+                // Close stdin
+                use nix::unistd::close;
+                close(0).ok();
+
+                // Change to working directory
+                std::env::set_current_dir(&root_dir).map_err(WorkDirError::CreateFailed)?;
+
+                // Set umask
+                use nix::sys::stat::{Mode, umask};
+                umask(Mode::from_bits_truncate(0o027));
+
+                let pid = std::process::id();
+                let daemon_dir = if daemon_dir_initial.as_os_str().is_empty() {
+                    // Auto mode: create PID-based directory
+                    get_selfci_runtime_dir()?.join(pid.to_string())
+                } else {
+                    // Explicit mode: use provided directory
+                    daemon_dir_initial
+                };
+
+                // Send daemon directory path back to parent
+                use std::io::Write;
+                let _ = writeln!(writer, "{}", daemon_dir.display());
+                drop(writer); // Close pipe so parent can exit
+
+                // Create directory and initialize (BEFORE redirecting stderr so errors are visible)
+                if let Err(e) = std::fs::create_dir_all(&daemon_dir) {
+                    eprintln!(
+                        "ERROR: Failed to create daemon directory {}: {}",
+                        daemon_dir.display(),
+                        e
+                    );
+                    eprintln!("Daemon startup failed - check permissions");
+                    return Err(WorkDirError::CreateFailed(e).into());
+                }
+
+                std::fs::write(
+                    daemon_dir.join("mq.dir"),
+                    root_dir.to_string_lossy().as_bytes(),
+                )
+                .map_err(WorkDirError::CreateFailed)?;
+                std::fs::write(daemon_dir.join("mq.pid"), pid.to_string())
+                    .map_err(WorkDirError::CreateFailed)?;
+
+                // Set up log file redirection
+                let log_path = log_file.unwrap_or_else(|| daemon_dir.join("mq.log"));
+                let log_file_handle =
+                    match OpenOptions::new().create(true).append(true).open(&log_path) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!(
+                                "ERROR: Failed to open log file {}: {}",
+                                log_path.display(),
+                                e
+                            );
+                            return Err(WorkDirError::CreateFailed(e).into());
+                        }
+                    };
+
+                // Redirect stdout/stderr using nix
+                use nix::unistd::dup2;
+                use std::os::unix::io::IntoRawFd;
+                // Transfer ownership of the fd so we can close it without double-close
+                let log_fd = log_file_handle.into_raw_fd();
+                dup2(log_fd, 1).map_err(|_| {
+                    WorkDirError::CreateFailed(std::io::Error::other("Failed to redirect stdout"))
+                })?;
+                dup2(log_fd, 2).map_err(|_| {
+                    WorkDirError::CreateFailed(std::io::Error::other("Failed to redirect stderr"))
+                })?;
+                close(log_fd).ok();
+
+                // Now stderr/stdout go to log file
+                eprintln!("Daemon process started successfully");
+                eprintln!("PID: {}", pid);
+                eprintln!("Runtime directory: {}", daemon_dir.display());
+                debug!("Daemon initialization complete");
+                daemon_dir
             }
         }
     } else {
-        // In foreground mode, write our PID manually for consistency
+        // Foreground mode - simpler
         let pid = std::process::id();
-        std::fs::write(&pid_path, pid.to_string()).map_err(WorkDirError::CreateFailed)?;
+        let daemon_dir = if daemon_dir_initial.as_os_str().is_empty() {
+            get_selfci_runtime_dir()?.join(pid.to_string())
+        } else {
+            daemon_dir_initial
+        };
+
+        std::fs::create_dir_all(&daemon_dir).map_err(WorkDirError::CreateFailed)?;
+        std::fs::write(
+            daemon_dir.join("mq.dir"),
+            root_dir.to_string_lossy().as_bytes(),
+        )
+        .map_err(WorkDirError::CreateFailed)?;
+        std::fs::write(daemon_dir.join("mq.pid"), pid.to_string())
+            .map_err(WorkDirError::CreateFailed)?;
 
         println!(
             "Merge queue daemon started for base branch: {}",
             base_branch
         );
-        println!("Socket: {}", socket_path.display());
-    }
+        println!("Runtime directory: {}", daemon_dir.display());
+        daemon_dir
+    };
 
-    // Set up cleanup on exit
-    let socket_path_cleanup = socket_path.clone();
-    let pid_path_cleanup = pid_path.clone();
+    // Set up cleanup on exit - remove entire daemon directory
+    let daemon_dir_cleanup = daemon_dir.clone();
     let _guard = scopeguard::guard((), move |_| {
-        std::fs::remove_file(&socket_path_cleanup).ok();
-        std::fs::remove_file(&pid_path_cleanup).ok();
+        std::fs::remove_dir_all(&daemon_dir_cleanup).ok();
     });
 
     // Bind socket
+    let socket_path = daemon_dir.join("mq.sock");
     let listener = UnixListener::bind(&socket_path).map_err(WorkDirError::CreateFailed)?;
 
     // Initialize state
@@ -514,14 +656,24 @@ fn merge_candidate(
 
 pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
-    let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
+
+    let daemon_dir = get_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
+        eprintln!("Merge queue daemon is not running for this project");
+        eprintln!("Start it with: selfci mq start --base-branch <branch>");
+        MainError::CheckFailed
+    })?;
+
+    let socket_path = daemon_dir.join("mq.sock");
 
     let response = mq_protocol::send_mq_request(
         &socket_path,
-        mq_protocol::MQRequest::AddCandidate { candidate, no_merge },
-    ).map_err(|e| {
+        mq_protocol::MQRequest::AddCandidate {
+            candidate,
+            no_merge,
+        },
+    )
+    .map_err(|e| {
         eprintln!("Error: {}", e);
-        eprintln!("Is the merge queue daemon running? Start it with: selfci mq start --base-branch <branch>");
         MainError::CheckFailed
     })?;
 
@@ -550,13 +702,18 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
 
 pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
-    let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
+
+    let daemon_dir = get_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
+        eprintln!("Merge queue daemon is not running for this project");
+        MainError::CheckFailed
+    })?;
+
+    let socket_path = daemon_dir.join("mq.sock");
 
     let response =
         mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::List { limit })
             .map_err(|e| {
                 eprintln!("Error: {}", e);
-                eprintln!("Is the merge queue daemon running?");
                 MainError::CheckFailed
             })?;
 
@@ -603,13 +760,18 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
 
 pub fn get_status(job_id: u64) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
-    let socket_path = root_dir.join(".config").join("selfci").join(".mq.sock");
+
+    let daemon_dir = get_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
+        eprintln!("Merge queue daemon is not running for this project");
+        MainError::CheckFailed
+    })?;
+
+    let socket_path = daemon_dir.join("mq.sock");
 
     let response =
         mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::GetStatus { job_id })
             .map_err(|e| {
                 eprintln!("Error: {}", e);
-                eprintln!("Is the merge queue daemon running?");
                 MainError::CheckFailed
             })?;
 
@@ -664,63 +826,70 @@ pub fn get_status(job_id: u64) -> Result<(), MainError> {
 
 pub fn stop_daemon() -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
-    let config_dir = root_dir.join(".config").join("selfci");
-    let pid_path = config_dir.join(".mq.pid");
-    let socket_path = config_dir.join(".mq.sock");
 
-    // Check daemon status
-    match is_daemon_running(&pid_path, &socket_path) {
-        DaemonStatus::NotRunning => {
-            eprintln!("Merge queue daemon is not running");
-            Err(MainError::CheckFailed)
-        }
-        DaemonStatus::Stale => {
-            println!("Cleaning up stale daemon files");
-            std::fs::remove_file(&pid_path).ok();
-            std::fs::remove_file(&socket_path).ok();
-            Ok(())
-        }
-        DaemonStatus::Running(pid) => {
-            println!("Stopping merge queue daemon (PID: {})...", pid);
+    // Find daemon directory
+    let daemon_dir = get_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
+        eprintln!("Merge queue daemon is not running for this project");
+        MainError::CheckFailed
+    })?;
 
-            // Send SIGTERM for graceful shutdown
-            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_err() {
-                eprintln!("Failed to send SIGTERM to process {}", pid);
-                return Err(MainError::CheckFailed);
+    let pid_file = daemon_dir.join("mq.pid");
+
+    // Read PID
+    let pid = match std::fs::read_to_string(&pid_file) {
+        Ok(content) => match content.trim().parse::<u32>() {
+            Ok(p) => p,
+            Err(_) => {
+                println!("Invalid PID file, cleaning up");
+                std::fs::remove_dir_all(&daemon_dir).ok();
+                return Ok(());
             }
-
-            // Wait for process to exit (with timeout)
-            let timeout = std::time::Duration::from_secs(30);
-            let start = std::time::Instant::now();
-
-            loop {
-                // Check if process still exists
-                let exists = signal::kill(Pid::from_raw(pid as i32), None).is_ok();
-
-                if !exists {
-                    println!("Daemon stopped successfully");
-                    // Clean up files
-                    std::fs::remove_file(&pid_path).ok();
-                    std::fs::remove_file(&socket_path).ok();
-                    return Ok(());
-                }
-
-                if start.elapsed() > timeout {
-                    eprintln!("Timeout waiting for daemon to stop, sending SIGKILL...");
-                    // Send SIGKILL as last resort
-                    let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-
-                    // Clean up files
-                    std::fs::remove_file(&pid_path).ok();
-                    std::fs::remove_file(&socket_path).ok();
-
-                    println!("Daemon forcefully terminated");
-                    return Ok(());
-                }
-
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+        },
+        Err(_) => {
+            println!("PID file not found, cleaning up stale directory");
+            std::fs::remove_dir_all(&daemon_dir).ok();
+            return Ok(());
         }
+    };
+
+    // Check if process exists
+    if signal::kill(Pid::from_raw(pid as i32), None).is_err() {
+        println!("Process not running, cleaning up");
+        std::fs::remove_dir_all(&daemon_dir).ok();
+        return Ok(());
+    }
+
+    // Send SIGTERM for graceful shutdown
+    if signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_err() {
+        eprintln!("Failed to send SIGTERM to process {}", pid);
+        return Err(MainError::CheckFailed);
+    }
+
+    // Wait for process to exit (with timeout)
+    let timeout = std::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+
+    loop {
+        // Check if process still exists
+        let exists = signal::kill(Pid::from_raw(pid as i32), None).is_ok();
+
+        if !exists {
+            println!("Daemon stopped successfully");
+            std::fs::remove_dir_all(&daemon_dir).ok();
+            return Ok(());
+        }
+
+        if start.elapsed() > timeout {
+            eprintln!("Timeout waiting for daemon to stop, sending SIGKILL...");
+            // Send SIGKILL as last resort
+            let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            std::fs::remove_dir_all(&daemon_dir).ok();
+            println!("Daemon forcefully terminated");
+            return Ok(());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }

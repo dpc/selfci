@@ -23,3 +23,6 @@ pub const SELFCI_VCS_FORCE: &str = "SELFCI_VCS_FORCE";
 
 /// Root working directory for CI checks
 pub const SELFCI_ROOT_DIR: &str = "SELFCI_ROOT_DIR";
+
+/// Explicit runtime directory for MQ daemon (optional)
+pub const SELFCI_MQ_RUNTIME_DIR: &str = "SELFCI_MQ_RUNTIME_DIR";

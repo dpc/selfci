@@ -84,7 +84,10 @@ fn main_inner() -> Result<(), MainError> {
             let job_name = match std::env::var(envs::SELFCI_JOB_NAME) {
                 Ok(name) => name,
                 Err(_) => {
-                    eprintln!("Error: {} environment variable not set", envs::SELFCI_JOB_NAME);
+                    eprintln!(
+                        "Error: {} environment variable not set",
+                        envs::SELFCI_JOB_NAME
+                    );
                     std::process::exit(1);
                 }
             };
@@ -93,7 +96,10 @@ fn main_inner() -> Result<(), MainError> {
             let socket_path = match std::env::var(envs::SELFCI_JOB_SOCK_PATH) {
                 Ok(path) => PathBuf::from(path),
                 Err(_) => {
-                    eprintln!("Error: {} environment variable not set", envs::SELFCI_JOB_SOCK_PATH);
+                    eprintln!(
+                        "Error: {} environment variable not set",
+                        envs::SELFCI_JOB_SOCK_PATH
+                    );
                     std::process::exit(1);
                 }
             };
@@ -151,7 +157,10 @@ fn main_inner() -> Result<(), MainError> {
             let socket_path = match std::env::var(envs::SELFCI_JOB_SOCK_PATH) {
                 Ok(path) => PathBuf::from(path),
                 Err(_) => {
-                    eprintln!("Error: {} environment variable not set", envs::SELFCI_JOB_SOCK_PATH);
+                    eprintln!(
+                        "Error: {} environment variable not set",
+                        envs::SELFCI_JOB_SOCK_PATH
+                    );
                     std::process::exit(1);
                 }
             };
