@@ -51,8 +51,10 @@ pub enum Commands {
         job_command: JobCommands,
     },
     /// Merge queue commands
-    #[command(subcommand)]
-    Mq(MQCommands),
+    Mq {
+        #[command(subcommand)]
+        command: Option<MQCommands>,
+    },
 }
 
 #[derive(Subcommand)]
