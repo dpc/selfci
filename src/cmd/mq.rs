@@ -1,9 +1,12 @@
 use duct::cmd;
 use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
+use nix::sys::stat::{Mode, umask};
+use nix::unistd::{ForkResult, Pid, close, dup2, fork, setsid};
 use selfci::{MainError, WorkDirError, envs, get_vcs, mq_protocol, protocol};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+use std::io::{BufRead, Write};
+use std::os::unix::io::IntoRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -115,32 +118,18 @@ struct MQState {
     completed: Vec<mq_protocol::MQJobInfo>,
 }
 
-pub fn start_daemon(
-    base_branch: Option<String>,
-    foreground: bool,
-    log_file: Option<PathBuf>,
-) -> Result<(), MainError> {
-    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
+/// Resolve the base branch from CLI argument or config file
+fn resolve_base_branch(base_branch: Option<String>, root_dir: &Path) -> Result<String, MainError> {
+    if let Some(branch) = base_branch {
+        return Ok(branch);
+    }
 
-    // Read config to get default base branch if not specified
-    let base_branch = if let Some(branch) = base_branch {
-        branch
-    } else {
-        // Try to read config from current directory
-        match selfci::config::read_config(&root_dir) {
-            Ok(config) => {
-                if let Some(mq_config) = config.mq {
-                    if let Some(branch) = mq_config.base_branch {
-                        branch
-                    } else {
-                        eprintln!(
-                            "Error: --base-branch not specified and mq.base-branch not set in config"
-                        );
-                        eprintln!(
-                            "Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml"
-                        );
-                        return Err(MainError::CheckFailed);
-                    }
+    // Try to read config from current directory
+    match selfci::config::read_config(root_dir) {
+        Ok(config) => {
+            if let Some(mq_config) = config.mq {
+                if let Some(branch) = mq_config.base_branch {
+                    Ok(branch)
                 } else {
                     eprintln!(
                         "Error: --base-branch not specified and mq.base-branch not set in config"
@@ -148,33 +137,171 @@ pub fn start_daemon(
                     eprintln!(
                         "Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml"
                     );
-                    return Err(MainError::CheckFailed);
+                    Err(MainError::CheckFailed)
                 }
-            }
-            Err(e) => {
+            } else {
                 eprintln!(
-                    "Error: --base-branch not specified and failed to read config: {}",
-                    e
+                    "Error: --base-branch not specified and mq.base-branch not set in config"
                 );
                 eprintln!(
                     "Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml"
                 );
-                return Err(MainError::CheckFailed);
+                Err(MainError::CheckFailed)
             }
         }
-    };
+        Err(e) => {
+            eprintln!(
+                "Error: --base-branch not specified and failed to read config: {}",
+                e
+            );
+            eprintln!(
+                "Either provide --base-branch or set mq.base-branch in .config/selfci/ci.yaml"
+            );
+            Err(MainError::CheckFailed)
+        }
+    }
+}
 
-    // Check if daemon is already running for this project
-    if let Some(existing_dir) = get_daemon_runtime_dir(&root_dir)?
+/// Check if a daemon is already running for this project and print info if so
+fn check_daemon_already_running(root_dir: &Path) -> Result<bool, MainError> {
+    if let Some(existing_dir) = get_daemon_runtime_dir(root_dir)?
         && let Ok(pid_str) = std::fs::read_to_string(existing_dir.join("mq.pid"))
         && let Ok(pid) = pid_str.trim().parse::<u32>()
     {
         println!("Merge queue daemon is already running (PID: {})", pid);
         println!("Runtime directory: {}", existing_dir.display());
         println!("Use 'selfci mq stop' to stop it");
-        return Ok(());
+        Ok(true)
+    } else {
+        Ok(false)
     }
+}
 
+/// Daemonize the process in background mode
+/// Forks the process, sets up session, redirects I/O, and returns daemon directory path
+fn daemonize_background(
+    root_dir: &Path,
+    daemon_dir_initial: PathBuf,
+    log_file: Option<PathBuf>,
+    base_branch: &str,
+) -> Result<PathBuf, MainError> {
+    // Background mode - manual fork so we can report PID back to parent
+    println!("Base branch: {}", base_branch);
+
+    // Create a pipe for the child to send its info back to the parent
+    let (reader, mut writer) =
+        std::os::unix::net::UnixStream::pair().map_err(WorkDirError::CreateFailed)?;
+
+    // Manual fork (instead of using daemonize crate, so parent can read from pipe)
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child: _ }) => {
+            // Parent process - read daemon dir from pipe and print it
+            drop(writer);
+
+            let reader = std::io::BufReader::new(reader);
+            if let Ok(Some(daemon_dir)) = reader.lines().next().transpose() {
+                println!("Runtime directory: {}", daemon_dir);
+            }
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("Failed to fork: {}", e);
+            return Err(MainError::CheckFailed);
+        }
+        Ok(ForkResult::Child) => {
+            // Child process - become session leader and continue as daemon
+            drop(reader);
+
+            // Become session leader
+            setsid().map_err(|_| {
+                WorkDirError::CreateFailed(std::io::Error::other("Failed to become session leader"))
+            })?;
+
+            // Close stdin
+            close(0).ok();
+
+            // Change to working directory
+            std::env::set_current_dir(root_dir).map_err(WorkDirError::CreateFailed)?;
+
+            // Set umask
+            umask(Mode::from_bits_truncate(0o027));
+
+            let pid = std::process::id();
+            let daemon_dir = if daemon_dir_initial.as_os_str().is_empty() {
+                // Auto mode: create PID-based directory
+                get_selfci_runtime_dir()?.join(pid.to_string())
+            } else {
+                // Explicit mode: use provided directory
+                daemon_dir_initial
+            };
+
+            // Send daemon directory path back to parent
+            let _ = writeln!(writer, "{}", daemon_dir.display());
+            drop(writer); // Close pipe so parent can exit
+
+            // Create directory and initialize (BEFORE redirecting stderr so errors are visible)
+            if let Err(e) = std::fs::create_dir_all(&daemon_dir) {
+                eprintln!(
+                    "ERROR: Failed to create daemon directory {}: {}",
+                    daemon_dir.display(),
+                    e
+                );
+                eprintln!("Daemon startup failed - check permissions");
+                return Err(WorkDirError::CreateFailed(e).into());
+            }
+
+            std::fs::write(
+                daemon_dir.join("mq.dir"),
+                root_dir.to_string_lossy().as_bytes(),
+            )
+            .map_err(WorkDirError::CreateFailed)?;
+            std::fs::write(daemon_dir.join("mq.pid"), pid.to_string())
+                .map_err(WorkDirError::CreateFailed)?;
+
+            // Set up log file redirection
+            let log_path = log_file.unwrap_or_else(|| daemon_dir.join("mq.log"));
+            let log_file_handle = match OpenOptions::new().create(true).append(true).open(&log_path)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!(
+                        "ERROR: Failed to open log file {}: {}",
+                        log_path.display(),
+                        e
+                    );
+                    return Err(WorkDirError::CreateFailed(e).into());
+                }
+            };
+
+            // Redirect stdout/stderr using nix
+            // Transfer ownership of the fd so we can close it without double-close
+            let log_fd = log_file_handle.into_raw_fd();
+            dup2(log_fd, 1).map_err(|_| {
+                WorkDirError::CreateFailed(std::io::Error::other("Failed to redirect stdout"))
+            })?;
+            dup2(log_fd, 2).map_err(|_| {
+                WorkDirError::CreateFailed(std::io::Error::other("Failed to redirect stderr"))
+            })?;
+            close(log_fd).ok();
+
+            // Now stderr/stdout go to log file
+            eprintln!("Daemon process started successfully");
+            eprintln!("PID: {}", pid);
+            eprintln!("Runtime directory: {}", daemon_dir.display());
+            debug!("Daemon initialization complete");
+            Ok(daemon_dir)
+        }
+    }
+}
+
+/// Initialize the daemon runtime directory and daemonize the process if in background mode
+/// Returns the daemon directory path
+fn initialize_daemon_dir(
+    root_dir: &Path,
+    foreground: bool,
+    log_file: Option<PathBuf>,
+    base_branch: &str,
+) -> Result<PathBuf, MainError> {
     // Determine initial daemon directory (may be modified after fork in background mode)
     let daemon_dir_initial = if let Ok(explicit_dir) = std::env::var(envs::SELFCI_MQ_RUNTIME_DIR) {
         // Mode 1: Use explicit directory
@@ -185,123 +312,8 @@ pub fn start_daemon(
     };
 
     // Daemonize and set up runtime directory
-    let daemon_dir = if !foreground {
-        // Background mode - manual fork so we can report PID back to parent
-        println!("Base branch: {}", base_branch);
-
-        // Create a pipe for the child to send its info back to the parent
-        let (reader, mut writer) =
-            std::os::unix::net::UnixStream::pair().map_err(WorkDirError::CreateFailed)?;
-
-        // Manual fork (instead of using daemonize crate, so parent can read from pipe)
-        use nix::unistd::{ForkResult, fork, setsid};
-        match unsafe { fork() } {
-            Ok(ForkResult::Parent { child: _ }) => {
-                // Parent process - read daemon dir from pipe and print it
-                drop(writer);
-
-                use std::io::BufRead;
-                let reader = std::io::BufReader::new(reader);
-                if let Ok(Some(daemon_dir)) = reader.lines().next().transpose() {
-                    println!("Runtime directory: {}", daemon_dir);
-                }
-                std::process::exit(0);
-            }
-            Err(e) => {
-                eprintln!("Failed to fork: {}", e);
-                return Err(MainError::CheckFailed);
-            }
-            Ok(ForkResult::Child) => {
-                // Child process - become session leader and continue as daemon
-                drop(reader);
-
-                // Become session leader
-                setsid().map_err(|_| {
-                    WorkDirError::CreateFailed(std::io::Error::other(
-                        "Failed to become session leader",
-                    ))
-                })?;
-
-                // Close stdin
-                use nix::unistd::close;
-                close(0).ok();
-
-                // Change to working directory
-                std::env::set_current_dir(&root_dir).map_err(WorkDirError::CreateFailed)?;
-
-                // Set umask
-                use nix::sys::stat::{Mode, umask};
-                umask(Mode::from_bits_truncate(0o027));
-
-                let pid = std::process::id();
-                let daemon_dir = if daemon_dir_initial.as_os_str().is_empty() {
-                    // Auto mode: create PID-based directory
-                    get_selfci_runtime_dir()?.join(pid.to_string())
-                } else {
-                    // Explicit mode: use provided directory
-                    daemon_dir_initial
-                };
-
-                // Send daemon directory path back to parent
-                use std::io::Write;
-                let _ = writeln!(writer, "{}", daemon_dir.display());
-                drop(writer); // Close pipe so parent can exit
-
-                // Create directory and initialize (BEFORE redirecting stderr so errors are visible)
-                if let Err(e) = std::fs::create_dir_all(&daemon_dir) {
-                    eprintln!(
-                        "ERROR: Failed to create daemon directory {}: {}",
-                        daemon_dir.display(),
-                        e
-                    );
-                    eprintln!("Daemon startup failed - check permissions");
-                    return Err(WorkDirError::CreateFailed(e).into());
-                }
-
-                std::fs::write(
-                    daemon_dir.join("mq.dir"),
-                    root_dir.to_string_lossy().as_bytes(),
-                )
-                .map_err(WorkDirError::CreateFailed)?;
-                std::fs::write(daemon_dir.join("mq.pid"), pid.to_string())
-                    .map_err(WorkDirError::CreateFailed)?;
-
-                // Set up log file redirection
-                let log_path = log_file.unwrap_or_else(|| daemon_dir.join("mq.log"));
-                let log_file_handle =
-                    match OpenOptions::new().create(true).append(true).open(&log_path) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            eprintln!(
-                                "ERROR: Failed to open log file {}: {}",
-                                log_path.display(),
-                                e
-                            );
-                            return Err(WorkDirError::CreateFailed(e).into());
-                        }
-                    };
-
-                // Redirect stdout/stderr using nix
-                use nix::unistd::dup2;
-                use std::os::unix::io::IntoRawFd;
-                // Transfer ownership of the fd so we can close it without double-close
-                let log_fd = log_file_handle.into_raw_fd();
-                dup2(log_fd, 1).map_err(|_| {
-                    WorkDirError::CreateFailed(std::io::Error::other("Failed to redirect stdout"))
-                })?;
-                dup2(log_fd, 2).map_err(|_| {
-                    WorkDirError::CreateFailed(std::io::Error::other("Failed to redirect stderr"))
-                })?;
-                close(log_fd).ok();
-
-                // Now stderr/stdout go to log file
-                eprintln!("Daemon process started successfully");
-                eprintln!("PID: {}", pid);
-                eprintln!("Runtime directory: {}", daemon_dir.display());
-                debug!("Daemon initialization complete");
-                daemon_dir
-            }
-        }
+    if !foreground {
+        daemonize_background(root_dir, daemon_dir_initial, log_file, base_branch)
     } else {
         // Foreground mode - simpler
         let pid = std::process::id();
@@ -325,8 +337,24 @@ pub fn start_daemon(
             base_branch
         );
         println!("Runtime directory: {}", daemon_dir.display());
-        daemon_dir
-    };
+        Ok(daemon_dir)
+    }
+}
+
+pub fn start_daemon(
+    base_branch: Option<String>,
+    foreground: bool,
+    log_file: Option<PathBuf>,
+) -> Result<(), MainError> {
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
+
+    let base_branch = resolve_base_branch(base_branch, &root_dir)?;
+
+    if check_daemon_already_running(&root_dir)? {
+        return Ok(());
+    }
+
+    let daemon_dir = initialize_daemon_dir(&root_dir, foreground, log_file, &base_branch)?;
 
     // Set up cleanup on exit - remove entire daemon directory
     let daemon_dir_cleanup = daemon_dir.clone();
@@ -642,10 +670,15 @@ fn merge_candidate(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
-) -> Result<String, String> {
+) -> Result<String, selfci::MergeError> {
     let mut merge_log = String::new();
     // Detect VCS first (needed to read config from base branch)
-    let vcs = get_vcs(root_dir, None).map_err(|e| format!("VCS error: {}", e))?;
+    let vcs = get_vcs(root_dir, None).map_err(|e| {
+        selfci::MergeError::ConfigReadFailed(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            e.to_string(),
+        ))
+    })?;
 
     // Read config from base branch (not from local working directory which could have uncommitted changes)
     let config_path = {
@@ -661,19 +694,18 @@ fn merge_candidate(
             cmd!("git", "show", format!("{}:{}", base_branch, config_path))
                 .dir(root_dir)
                 .read()
-                .map_err(|e| format!("Failed to read config from {}: {}", base_branch, e))?
+                .map_err(selfci::MergeError::ConfigReadFailed)?
         }
         selfci::VCS::Jujutsu => {
-            // Read config from base branch using jj cat
-            cmd!("jj", "cat", "-r", base_branch, &config_path)
+            // Read config from base branch using jj file show
+            cmd!("jj", "file", "show", "-r", base_branch, &config_path)
                 .dir(root_dir)
                 .read()
-                .map_err(|e| format!("Failed to read config from {}: {}", base_branch, e))?
+                .map_err(selfci::MergeError::ConfigReadFailed)?
         }
     };
 
-    let config: selfci::config::SelfCIConfig = serde_yaml::from_str(&config_content)
-        .map_err(|e| format!("Failed to parse config: {}", e))?;
+    let config: selfci::config::SelfCIConfig = serde_yaml::from_str(&config_content)?;
 
     let merge_style = config
         .mq
@@ -708,7 +740,7 @@ fn merge_candidate(
             .dir(root_dir)
             .stderr_to_stdout()
             .read()
-            .map_err(|e| format!("Failed to create temporary worktree: {}", e))?;
+            .map_err(selfci::MergeError::WorktreeCreateFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
@@ -725,12 +757,7 @@ fn merge_candidate(
                 .dir(&temp_worktree)
                 .stderr_to_stdout()
                 .read()
-                .map_err(|e| {
-                    format!(
-                        "Failed to rebase {} ({}) onto {}: {}",
-                        candidate.user, candidate.commit_id, base_branch, e
-                    )
-                })?;
+                .map_err(selfci::MergeError::RebaseFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
@@ -745,7 +772,7 @@ fn merge_candidate(
             .dir(&temp_worktree)
             .stderr_to_stdout()
             .read()
-            .map_err(|e| format!("Failed to update {}: {}", base_branch, e))?;
+            .map_err(selfci::MergeError::BranchUpdateFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
@@ -781,7 +808,7 @@ fn merge_candidate(
             .dir(root_dir)
             .stderr_to_stdout()
             .read()
-            .map_err(|e| format!("Failed to create temporary worktree: {}", e))?;
+            .map_err(selfci::MergeError::WorktreeCreateFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
@@ -798,12 +825,7 @@ fn merge_candidate(
                 .dir(&temp_worktree)
                 .stderr_to_stdout()
                 .read()
-                .map_err(|e| {
-                    format!(
-                        "Failed to merge {} ({}): {}",
-                        candidate.user, candidate.commit_id, e
-                    )
-                })?;
+                .map_err(selfci::MergeError::MergeFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
@@ -818,7 +840,7 @@ fn merge_candidate(
             .dir(&temp_worktree)
             .stderr_to_stdout()
             .read()
-            .map_err(|e| format!("Failed to update {}: {}", base_branch, e))?;
+            .map_err(selfci::MergeError::BranchUpdateFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
@@ -849,15 +871,17 @@ fn merge_candidate(
             )
             .dir(root_dir)
             .read()
-            .map_err(|e| format!("Failed to get change ID: {}", e))?
+            .map_err(selfci::MergeError::ChangeIdFailed)?
             .trim()
             .to_string();
             merge_log.push_str(&format!("Change ID: {}\n", change_id));
 
             // Use -b (branch) to rebase the candidate and its ancestors (that aren't in base) onto base branch
+            // Use --ignore-working-copy to prevent updating the working directory
             merge_log.push_str("Rebasing branch\n");
             let output = cmd!(
                 "jj",
+                "--ignore-working-copy",
                 "rebase",
                 "-b",
                 candidate.commit_id.as_str(),
@@ -867,12 +891,7 @@ fn merge_candidate(
             .dir(root_dir)
             .stderr_to_stdout()
             .read()
-            .map_err(|e| {
-                format!(
-                    "Failed to rebase {} ({}) onto {}: {}",
-                    candidate.user, candidate.commit_id, base_branch, e
-                )
-            })?;
+            .map_err(selfci::MergeError::RebaseFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
@@ -881,13 +900,30 @@ fn merge_candidate(
                 "Moving {} bookmark to rebased commit\n",
                 base_branch
             ));
-            let output = cmd!("jj", "bookmark", "set", base_branch, "-r", &change_id)
+            let output = cmd!(
+                "jj",
+                "--ignore-working-copy",
+                "bookmark",
+                "set",
+                base_branch,
+                "-r",
+                &change_id
+            )
+            .dir(root_dir)
+            .stderr_to_stdout()
+            .read()
+            .map_err(selfci::MergeError::BranchUpdateFailed)?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // Update the working copy snapshot to avoid "stale working copy" errors
+            merge_log.push_str("Updating working copy snapshot\n");
+            let output = cmd!("jj", "workspace", "update-stale")
                 .dir(root_dir)
                 .stderr_to_stdout()
                 .read()
-                .map_err(|e| format!("Failed to move bookmark {}: {}", base_branch, e))?;
+                .map_err(selfci::MergeError::BranchUpdateFailed)?;
             merge_log.push_str(&output);
-            merge_log.push('\n');
 
             merge_log.push_str("Rebase completed successfully\n");
             Ok(merge_log)
@@ -899,31 +935,99 @@ fn merge_candidate(
                 candidate.commit_id, base_branch
             ));
 
+            // Save the current @ change ID so we can restore it later
+            merge_log.push_str("Saving current working copy change ID\n");
+            let original_change_id = cmd!(
+                "jj",
+                "log",
+                "-r",
+                "@",
+                "-T",
+                "change_id",
+                "--no-graph",
+                "--color=never"
+            )
+            .dir(root_dir)
+            .read()
+            .map_err(selfci::MergeError::ChangeIdFailed)?
+            .trim()
+            .to_string();
+            merge_log.push_str(&format!("Original @ change ID: {}\n", original_change_id));
+
             // Create a new merge commit with both base and candidate as parents
+            // Use --ignore-working-copy to prevent updating the working directory
             merge_log.push_str("Creating merge commit\n");
-            let output = cmd!("jj", "new", base_branch, candidate.commit_id.as_str())
-                .dir(root_dir)
-                .stderr_to_stdout()
-                .read()
-                .map_err(|e| {
-                    format!(
-                        "Failed to create merge commit of {} ({}) into {}: {}",
-                        candidate.user, candidate.commit_id, base_branch, e
-                    )
-                })?;
+            let output = cmd!(
+                "jj",
+                "--ignore-working-copy",
+                "new",
+                base_branch,
+                candidate.commit_id.as_str()
+            )
+            .dir(root_dir)
+            .stderr_to_stdout()
+            .read()
+            .map_err(selfci::MergeError::MergeFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
-            // Move the base branch bookmark to this new merge commit
+            // Get the commit ID of the merge commit we just created (currently @)
+            merge_log.push_str("Getting merge commit ID\n");
+            let merge_commit_id = cmd!(
+                "jj",
+                "log",
+                "-r",
+                "@",
+                "-T",
+                "commit_id",
+                "--no-graph",
+                "--color=never"
+            )
+            .dir(root_dir)
+            .read()
+            .map_err(selfci::MergeError::ChangeIdFailed)?
+            .trim()
+            .to_string();
+            merge_log.push_str(&format!("Merge commit ID: {}\n", merge_commit_id));
+
+            // Move the base branch bookmark to the merge commit first
             merge_log.push_str(&format!(
                 "Moving {} bookmark to merge commit\n",
                 base_branch
             ));
-            let output = cmd!("jj", "bookmark", "set", base_branch, "-r", "@")
+            let output = cmd!(
+                "jj",
+                "--ignore-working-copy",
+                "bookmark",
+                "set",
+                base_branch,
+                "-r",
+                &merge_commit_id
+            )
+            .dir(root_dir)
+            .stderr_to_stdout()
+            .read()
+            .map_err(selfci::MergeError::BranchUpdateFailed)?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // First update the working copy snapshot, then restore original @
+            merge_log.push_str("Updating working copy snapshot\n");
+            let output = cmd!("jj", "workspace", "update-stale")
                 .dir(root_dir)
                 .stderr_to_stdout()
                 .read()
-                .map_err(|e| format!("Failed to move bookmark {}: {}", base_branch, e))?;
+                .map_err(selfci::MergeError::BranchUpdateFailed)?;
+            merge_log.push_str(&output);
+            merge_log.push('\n');
+
+            // Move @ back to the original change (this will update working directory files)
+            merge_log.push_str("Restoring original working copy\n");
+            let output = cmd!("jj", "edit", &original_change_id)
+                .dir(root_dir)
+                .stderr_to_stdout()
+                .read()
+                .map_err(selfci::MergeError::BranchUpdateFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 

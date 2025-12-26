@@ -52,6 +52,25 @@ error_set! {
     MainError := VCSError || WorkDirError || VCSOperationError || ConfigError || CheckError || RevisionError
 }
 
+error_set! {
+    MergeError := {
+        #[display("Failed to read config from base branch")]
+        ConfigReadFailed(std::io::Error),
+        #[display("Failed to parse config from base branch")]
+        ConfigParseFailed(serde_yaml::Error),
+        #[display("Failed to create temporary worktree")]
+        WorktreeCreateFailed(std::io::Error),
+        #[display("Failed to rebase")]
+        RebaseFailed(std::io::Error),
+        #[display("Failed to merge")]
+        MergeFailed(std::io::Error),
+        #[display("Failed to update branch")]
+        BranchUpdateFailed(std::io::Error),
+        #[display("Failed to get change ID")]
+        ChangeIdFailed(std::io::Error),
+    }
+}
+
 impl MainError {
     pub fn exit_code(&self) -> i32 {
         match self {
