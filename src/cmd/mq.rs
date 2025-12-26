@@ -217,8 +217,22 @@ fn daemonize_background(
                 WorkDirError::CreateFailed(std::io::Error::other("Failed to become session leader"))
             })?;
 
-            // Close stdin
-            close(0).ok();
+            // Redirect stdin to /dev/null instead of closing it
+            // This prevents fd 0 from being accidentally reused
+            let devnull = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")
+                .map_err(WorkDirError::CreateFailed)?;
+            let devnull_fd = devnull.into_raw_fd();
+            dup2(devnull_fd, 0).map_err(|_| {
+                WorkDirError::CreateFailed(std::io::Error::other(
+                    "Failed to redirect stdin to /dev/null",
+                ))
+            })?;
+            if devnull_fd > 2 {
+                close(devnull_fd).ok();
+            }
 
             // Change to working directory
             std::env::set_current_dir(root_dir).map_err(WorkDirError::CreateFailed)?;
