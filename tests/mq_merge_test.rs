@@ -30,10 +30,10 @@ fn wait_for_job_completion(repo_path: &Path, job_id: u64, timeout_secs: u64) -> 
             .read()
             .ok();
 
-        if let Some(output) = output {
-            if output.contains("Status: Passed") || output.contains("Status: Failed") {
-                return output.contains("Status: Passed");
-            }
+        if let Some(output) = output
+            && (output.contains("Status: Passed") || output.contains("Status: Failed"))
+        {
+            return output.contains("Status: Passed");
         }
 
         thread::sleep(Duration::from_millis(100));
@@ -383,7 +383,7 @@ fn test_git_rebase_merge() {
     let job_id: u64 = output
         .lines()
         .find(|l| l.contains("job ID"))
-        .and_then(|l| l.split(':').last())
+        .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to extract job ID");
 
@@ -430,7 +430,7 @@ fn test_git_merge_merge() {
     let job_id: u64 = output
         .lines()
         .find(|l| l.contains("job ID"))
-        .and_then(|l| l.split(':').last())
+        .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to extract job ID");
 
@@ -470,7 +470,7 @@ fn test_jj_rebase_merge() {
     let job_id: u64 = output
         .lines()
         .find(|l| l.contains("job ID"))
-        .and_then(|l| l.split(':').last())
+        .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to extract job ID");
 
@@ -510,7 +510,7 @@ fn test_jj_merge_merge() {
     let job_id: u64 = output
         .lines()
         .find(|l| l.contains("job ID"))
-        .and_then(|l| l.split(':').last())
+        .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to extract job ID");
 

@@ -1,3 +1,6 @@
+// Test helper functions may not be used by all test binaries
+#![allow(dead_code)]
+
 use duct::cmd;
 use selfci::constants;
 use std::fs;
