@@ -199,9 +199,7 @@ pub fn control_socket_listener(
                                     return;
                                 }
 
-                                // Poll for completion (with timeout)
-                                let timeout = std::time::Duration::from_secs(300); // 5 minutes
-                                let start = std::time::Instant::now();
+                                // Poll for completion (no timeout)
                                 let poll_interval = std::time::Duration::from_millis(100);
 
                                 loop {
@@ -216,16 +214,6 @@ pub fn control_socket_listener(
                                             );
                                             return;
                                         }
-                                    }
-
-                                    if start.elapsed() > timeout {
-                                        let _ = protocol::write_response(
-                                            &mut stream,
-                                            protocol::JobControlResponse::Error(
-                                                "Timeout waiting for job".to_string(),
-                                            ),
-                                        );
-                                        return;
                                     }
 
                                     std::thread::sleep(poll_interval);
