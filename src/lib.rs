@@ -217,6 +217,13 @@ fn copy_revision_to_workdir_jj(
                 .stderr_null()
                 .run()
                 .map_err(VCSOperationError::CommandFailed)?;
+
+            // Checkout the specific revision (commit ID), suppressing all output
+            cmd!("git", "checkout", "--quiet", revision)
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
         }
         CloneMode::Partial => {
             // Clone with blob filter for partial clone (downloads commits/trees, fetches blobs on-demand)
@@ -233,15 +240,45 @@ fn copy_revision_to_workdir_jj(
             .stderr_null()
             .run()
             .map_err(VCSOperationError::CommandFailed)?;
+
+            // Checkout the specific revision (commit ID), suppressing all output
+            cmd!("git", "checkout", "--quiet", revision)
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+        }
+        CloneMode::Shallow => {
+            // Shallow clone: most compact, only fetches the specific commit
+            // Initialize empty repository
+            cmd!("git", "init", "--quiet")
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+
+            // Add remote
+            cmd!("git", "remote", "add", "origin", &git_url)
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+
+            // Fetch just the specific commit with depth 1
+            cmd!("git", "fetch", "--quiet", "--depth=1", "origin", revision)
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+
+            // Checkout the fetched commit
+            cmd!("git", "checkout", "--quiet", "FETCH_HEAD")
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
         }
     }
-
-    // Checkout the specific revision (commit ID), suppressing all output
-    cmd!("git", "checkout", "--quiet", revision)
-        .dir(workdir)
-        .stderr_null()
-        .run()
-        .map_err(VCSOperationError::CommandFailed)?;
 
     Ok(())
 }
@@ -263,6 +300,13 @@ fn copy_revision_to_workdir_git(
                 .stderr_null()
                 .run()
                 .map_err(VCSOperationError::CommandFailed)?;
+
+            // Checkout the specific revision (commit ID), suppressing all output
+            cmd!("git", "checkout", "--quiet", revision)
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
         }
         CloneMode::Partial => {
             // Clone with blob filter for partial clone (downloads commits/trees, fetches blobs on-demand)
@@ -279,15 +323,45 @@ fn copy_revision_to_workdir_git(
             .stderr_null()
             .run()
             .map_err(VCSOperationError::CommandFailed)?;
+
+            // Checkout the specific revision (commit ID), suppressing all output
+            cmd!("git", "checkout", "--quiet", revision)
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+        }
+        CloneMode::Shallow => {
+            // Shallow clone: most compact, only fetches the specific commit
+            // Initialize empty repository
+            cmd!("git", "init", "--quiet")
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+
+            // Add remote
+            cmd!("git", "remote", "add", "origin", &root_url)
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+
+            // Fetch just the specific commit with depth 1
+            cmd!("git", "fetch", "--quiet", "--depth=1", "origin", revision)
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+
+            // Checkout the fetched commit
+            cmd!("git", "checkout", "--quiet", "FETCH_HEAD")
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
         }
     }
-
-    // Checkout the specific revision (commit ID), suppressing all output
-    cmd!("git", "checkout", "--quiet", revision)
-        .dir(workdir)
-        .stderr_null()
-        .run()
-        .map_err(VCSOperationError::CommandFailed)?;
 
     Ok(())
 }

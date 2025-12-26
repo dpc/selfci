@@ -15,6 +15,7 @@ fn default_command_prefix() -> Vec<String> {
 pub enum CloneMode {
     Full,
     Partial,
+    Shallow,
 }
 
 fn default_clone_mode() -> CloneMode {

@@ -14,9 +14,10 @@ job:
   # of `command` altogether.
   # command-prefix: ["bash", "-c"]
 
-  # Clone mode: "partial" or "full" (default: partial)
-  # - partial: Fast, uses partial clone (--filter=blob:none) to avoid downloading all blobs
-  # - full: Slower, clones complete repository history with all objects
+  # Clone mode: "partial", "shallow", or "full" (default: partial)
+  # - partial: Fast, uses partial clone (--filter=blob:none) - all commits, blobs on-demand
+  # - shallow: Most compact, uses shallow clone (--depth=1) - single commit only
+  # - full: Complete clone with all history and objects
   clone-mode: partial
 
 # Merge queue configuration (optional)
