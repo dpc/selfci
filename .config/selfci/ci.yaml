@@ -1,5 +1,5 @@
 job:
-  clone-mode: shallow
+  clone-mode: partial
   command: ./.config/selfci/ci.sh
 
 mq:

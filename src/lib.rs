@@ -206,24 +206,27 @@ fn copy_revision_to_workdir_jj(
     git_dir: &str,
     clone_mode: CloneMode,
 ) -> Result<(), VCSOperationError> {
+    // Convert to file:// URL for local clones to make --filter work
+    let git_url = format!("file://{}", git_dir);
+
     match clone_mode {
         CloneMode::Full => {
             // Clone the full git repository into the workdir
-            cmd!("git", "clone", "--quiet", git_dir, ".")
+            cmd!("git", "clone", "--quiet", &git_url, ".")
                 .dir(workdir)
                 .stderr_null()
                 .run()
                 .map_err(VCSOperationError::CommandFailed)?;
         }
-        CloneMode::Shallow => {
-            // Clone with blob filter for shallow clone (partial clone without blobs)
+        CloneMode::Partial => {
+            // Clone with blob filter for partial clone (downloads commits/trees, fetches blobs on-demand)
             cmd!(
                 "git",
                 "clone",
                 "--quiet",
                 "--filter=blob:none",
                 "--no-checkout",
-                git_dir,
+                &git_url,
                 "."
             )
             .dir(workdir)
@@ -249,24 +252,27 @@ fn copy_revision_to_workdir_git(
     revision: &str,
     clone_mode: CloneMode,
 ) -> Result<(), VCSOperationError> {
+    // Convert to file:// URL for local clones to make --filter work
+    let root_url = format!("file://{}", root_dir.display());
+
     match clone_mode {
         CloneMode::Full => {
             // Clone the full git repository into the workdir
-            cmd!("git", "clone", "--quiet", root_dir, ".")
+            cmd!("git", "clone", "--quiet", &root_url, ".")
                 .dir(workdir)
                 .stderr_null()
                 .run()
                 .map_err(VCSOperationError::CommandFailed)?;
         }
-        CloneMode::Shallow => {
-            // Clone with blob filter for shallow clone (partial clone without blobs)
+        CloneMode::Partial => {
+            // Clone with blob filter for partial clone (downloads commits/trees, fetches blobs on-demand)
             cmd!(
                 "git",
                 "clone",
                 "--quiet",
                 "--filter=blob:none",
                 "--no-checkout",
-                root_dir,
+                &root_url,
                 "."
             )
             .dir(workdir)

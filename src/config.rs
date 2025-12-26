@@ -14,11 +14,11 @@ fn default_command_prefix() -> Vec<String> {
 #[serde(rename_all = "lowercase")]
 pub enum CloneMode {
     Full,
-    Shallow,
+    Partial,
 }
 
 fn default_clone_mode() -> CloneMode {
-    CloneMode::Shallow
+    CloneMode::Partial
 }
 
 #[derive(Debug, Clone, Deserialize)]
