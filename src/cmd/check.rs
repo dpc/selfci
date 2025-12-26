@@ -7,7 +7,15 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, info};
+
+/// Create a temporary directory with "selfci-" prefix for easier identification
+fn create_selfci_tempdir() -> Result<tempfile::TempDir, WorkDirError> {
+    tempfile::Builder::new()
+        .prefix("selfci-")
+        .tempdir()
+        .map_err(WorkDirError::CreateFailed)
+}
 
 /// Mode for running a check - determines output behavior and result handling
 pub enum CheckMode {
@@ -51,7 +59,7 @@ pub fn run_candidate_check(
     debug!(vcs = ?vcs, root_dir = %root_dir.display(), forced = forced_vcs.is_some(), "Using VCS");
 
     // Allocate base work directory
-    let base_workdir = tempfile::tempdir().map_err(WorkDirError::CreateFailed)?;
+    let base_workdir = create_selfci_tempdir()?;
 
     debug!(
         base_workdir = %base_workdir.path().display(),
@@ -67,7 +75,7 @@ pub fn run_candidate_check(
     );
 
     // Create a single candidate workdir (shared by all jobs)
-    let candidate_workdir = tempfile::tempdir().map_err(WorkDirError::CreateFailed)?;
+    let candidate_workdir = create_selfci_tempdir()?;
 
     // Copy revisions to workdirs
     copy_revisions_to_workdirs(
@@ -377,6 +385,12 @@ pub fn check(
         "Resolved revisions"
     );
 
+    // Log the start of the check with candidate info
+    info!(
+        candidate = %resolved_candidate.user,
+        commit = &resolved_candidate.commit_id.as_str()[..8],
+        "Starting check"
+    );
     // Determine parallelism level
     let parallelism = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()

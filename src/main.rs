@@ -25,7 +25,11 @@ fn main() {
     if use_full_format {
         subscriber.init();
     } else {
-        subscriber.without_time().with_target(false).init();
+        subscriber
+            .without_time()
+            .with_target(false)
+            .with_level(false)
+            .init();
     }
 
     if let Err(err) = main_inner() {
