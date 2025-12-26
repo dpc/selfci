@@ -71,8 +71,7 @@ pub fn read_config(base_workdir: &Path) -> Result<SelfCIConfig, ConfigError> {
 
     let config_content = std::fs::read_to_string(&config_path).map_err(ConfigError::ReadFailed)?;
 
-    let config: SelfCIConfig =
-        serde_yaml::from_str(&config_content).map_err(ConfigError::ParseFailed)?;
+    let config: SelfCIConfig = serde_yaml::from_str(&config_content)?;
 
     Ok(config)
 }

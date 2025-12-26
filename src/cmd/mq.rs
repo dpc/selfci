@@ -206,7 +206,7 @@ fn daemonize_background(
         }
         Err(e) => {
             eprintln!("Failed to fork: {}", e);
-            return Err(MainError::CheckFailed);
+            Err(MainError::CheckFailed)
         }
         Ok(ForkResult::Child) => {
             // Child process - become session leader and continue as daemon

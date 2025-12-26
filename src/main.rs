@@ -4,6 +4,7 @@ mod opts;
 use clap::Parser;
 use opts::{Cli, Commands, JobCommands, StepCommands};
 use selfci::{MainError, detect_vcs, envs, init_config, protocol};
+use std::error::Error;
 use std::path::PathBuf;
 
 fn main() {
@@ -34,13 +35,12 @@ fn main() {
 
     if let Err(err) = main_inner() {
         // Print the error chain
-        eprintln!("Error: {}", err);
+        eprintln!("Error: {}", &err);
 
-        // Print source chain if available
-        let mut source = std::error::Error::source(&err);
+        let mut source = err.source();
         while let Some(err) = source {
             eprintln!("Caused by: {}", err);
-            source = std::error::Error::source(err);
+            source = err.source();
         }
 
         std::process::exit(err.exit_code());
