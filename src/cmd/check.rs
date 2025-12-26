@@ -58,6 +58,10 @@ pub fn run_candidate_check(
     let vcs = get_vcs(root_dir, forced_vcs)?;
     debug!(vcs = ?vcs, root_dir = %root_dir.display(), forced = forced_vcs.is_some(), "Using VCS");
 
+    // Read config from root directory to get clone mode setting
+    let root_config = read_config(root_dir)?;
+    debug!(clone_mode = ?root_config.job.clone_mode, "Using clone mode from config");
+
     // Allocate base work directory
     let base_workdir = create_selfci_tempdir()?;
 
@@ -77,7 +81,7 @@ pub fn run_candidate_check(
     // Create a single candidate workdir (shared by all jobs)
     let candidate_workdir = create_selfci_tempdir()?;
 
-    // Copy revisions to workdirs
+    // Copy revisions to workdirs using configured clone mode
     copy_revisions_to_workdirs(
         &vcs,
         root_dir,
@@ -85,11 +89,12 @@ pub fn run_candidate_check(
         &base_rev.commit_id,
         candidate_workdir.path(),
         &candidate_rev.commit_id,
+        root_config.job.clone_mode,
     )?;
 
-    // Read config from base workdir
+    // Read config from base workdir to get the actual CI command
     let config = read_config(base_workdir.path())?;
-    debug!("Loaded config");
+    debug!("Loaded job config from base revision");
 
     // Create control socket
     let socket_file = tempfile::NamedTempFile::new().map_err(WorkDirError::CreateFailed)?;

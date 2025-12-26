@@ -1,6 +1,6 @@
 mod common;
 
-use selfci::{VCS, copy_revisions_to_workdirs, revision};
+use selfci::{CloneMode, VCS, copy_revisions_to_workdirs, revision};
 use std::fs;
 use tempfile::TempDir;
 
@@ -27,6 +27,7 @@ fn test_copy_revisions_jujutsu() {
         &resolved_base.commit_id,
         candidate_workdir.path(),
         &resolved_candidate.commit_id,
+        CloneMode::Full,
     );
     assert!(
         result.is_ok(),
@@ -78,6 +79,7 @@ fn test_copy_revisions_git() {
         &resolved_base.commit_id,
         candidate_workdir.path(),
         &resolved_candidate.commit_id,
+        CloneMode::Full,
     );
     assert!(
         result.is_ok(),

@@ -10,12 +10,25 @@ fn default_command_prefix() -> Vec<String> {
     vec!["bash".to_string(), "-c".to_string()]
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloneMode {
+    Full,
+    Shallow,
+}
+
+fn default_clone_mode() -> CloneMode {
+    CloneMode::Shallow
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobConfig {
     pub command: String,
     #[serde(default = "default_command_prefix", rename = "command-prefix")]
     pub command_prefix: Vec<String>,
+    #[serde(default = "default_clone_mode", rename = "clone-mode")]
+    pub clone_mode: CloneMode,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

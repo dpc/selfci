@@ -10,7 +10,7 @@ use duct::cmd;
 use error_set::error_set;
 use std::path::Path;
 
-pub use config::{SelfCIConfig, init_config, read_config};
+pub use config::{CloneMode, SelfCIConfig, init_config, read_config};
 
 error_set! {
     VCSError := {
@@ -140,6 +140,7 @@ pub fn copy_revisions_to_workdirs(
     base_revision: &revision::CommitId,
     candidate_workdir: &Path,
     candidate_revision: &revision::CommitId,
+    clone_mode: CloneMode,
 ) -> Result<(), VCSOperationError> {
     match vcs {
         VCS::Jujutsu => {
@@ -157,7 +158,13 @@ pub fn copy_revisions_to_workdirs(
             let git_dir = git_dir.trim();
 
             // Copy base revision
-            copy_revision_to_workdir_jj(root_dir, base_workdir, base_revision.as_str(), git_dir)?;
+            copy_revision_to_workdir_jj(
+                root_dir,
+                base_workdir,
+                base_revision.as_str(),
+                git_dir,
+                clone_mode,
+            )?;
 
             // Copy candidate revision
             copy_revision_to_workdir_jj(
@@ -165,16 +172,27 @@ pub fn copy_revisions_to_workdirs(
                 candidate_workdir,
                 candidate_revision.as_str(),
                 git_dir,
+                clone_mode,
             )?;
 
             Ok(())
         }
         VCS::Git => {
             // Copy base revision
-            copy_revision_to_workdir_git(root_dir, base_workdir, base_revision.as_str())?;
+            copy_revision_to_workdir_git(
+                root_dir,
+                base_workdir,
+                base_revision.as_str(),
+                clone_mode,
+            )?;
 
             // Copy candidate revision
-            copy_revision_to_workdir_git(root_dir, candidate_workdir, candidate_revision.as_str())?;
+            copy_revision_to_workdir_git(
+                root_dir,
+                candidate_workdir,
+                candidate_revision.as_str(),
+                clone_mode,
+            )?;
 
             Ok(())
         }
@@ -186,13 +204,34 @@ fn copy_revision_to_workdir_jj(
     workdir: &Path,
     revision: &str,
     git_dir: &str,
+    clone_mode: CloneMode,
 ) -> Result<(), VCSOperationError> {
-    // Clone the git repository into the workdir
-    cmd!("git", "clone", "--quiet", git_dir, ".")
-        .dir(workdir)
-        .stderr_null()
-        .run()
-        .map_err(VCSOperationError::CommandFailed)?;
+    match clone_mode {
+        CloneMode::Full => {
+            // Clone the full git repository into the workdir
+            cmd!("git", "clone", "--quiet", git_dir, ".")
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+        }
+        CloneMode::Shallow => {
+            // Clone with blob filter for shallow clone (partial clone without blobs)
+            cmd!(
+                "git",
+                "clone",
+                "--quiet",
+                "--filter=blob:none",
+                "--no-checkout",
+                git_dir,
+                "."
+            )
+            .dir(workdir)
+            .stderr_null()
+            .run()
+            .map_err(VCSOperationError::CommandFailed)?;
+        }
+    }
 
     // Checkout the specific revision (commit ID), suppressing all output
     cmd!("git", "checkout", "--quiet", revision)
@@ -208,13 +247,34 @@ fn copy_revision_to_workdir_git(
     root_dir: &Path,
     workdir: &Path,
     revision: &str,
+    clone_mode: CloneMode,
 ) -> Result<(), VCSOperationError> {
-    // Clone the git repository into the workdir
-    cmd!("git", "clone", "--quiet", root_dir, ".")
-        .dir(workdir)
-        .stderr_null()
-        .run()
-        .map_err(VCSOperationError::CommandFailed)?;
+    match clone_mode {
+        CloneMode::Full => {
+            // Clone the full git repository into the workdir
+            cmd!("git", "clone", "--quiet", root_dir, ".")
+                .dir(workdir)
+                .stderr_null()
+                .run()
+                .map_err(VCSOperationError::CommandFailed)?;
+        }
+        CloneMode::Shallow => {
+            // Clone with blob filter for shallow clone (partial clone without blobs)
+            cmd!(
+                "git",
+                "clone",
+                "--quiet",
+                "--filter=blob:none",
+                "--no-checkout",
+                root_dir,
+                "."
+            )
+            .dir(workdir)
+            .stderr_null()
+            .run()
+            .map_err(VCSOperationError::CommandFailed)?;
+        }
+    }
 
     // Checkout the specific revision (commit ID), suppressing all output
     cmd!("git", "checkout", "--quiet", revision)

@@ -14,6 +14,11 @@ job:
   # of `command` altogether.
   # command-prefix: ["bash", "-c"]
 
+  # Clone mode: "shallow" or "full" (default: shallow)
+  # - shallow: Fast, uses partial clone (--filter=blob:none) to avoid downloading all blobs
+  # - full: Slower, clones complete repository history
+  clone-mode: shallow
+
 # Merge queue configuration (optional)
 # mq:
 #   # Default base branch for merge queue
