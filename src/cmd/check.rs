@@ -189,14 +189,14 @@ pub fn run_candidate_check(
     for message in messages_receiver {
         match message {
             super::worker::JobMessage::Started { job_name } => {
-                debug!(job = %job_name, "Job started");
+                debug!(job = %job_name, "Started");
                 active_jobs += 1;
                 total_jobs += 1;
 
                 // Always print job status messages in Inline mode
                 if matches!(mode, CheckMode::Inline { .. }) {
                     println!(
-                        "[{}/{}] Job started: {}",
+                        "[{}/{}] started: {}",
                         total_jobs - active_jobs,
                         total_jobs,
                         job_name
@@ -204,7 +204,7 @@ pub fn run_candidate_check(
                 }
             }
             super::worker::JobMessage::Completed(mut outcome) => {
-                debug!(job = %outcome.job_name, exit_code = ?outcome.exit_code, "Job completed");
+                debug!(job = %outcome.job_name, exit_code = ?outcome.exit_code, "completed");
 
                 // Look up steps for this job and mark Running steps as Success
                 {
@@ -280,7 +280,7 @@ pub fn run_candidate_check(
                             "no exit code".to_string()
                         };
                         println!(
-                            "[{}/{}] Job failed: {} ({}, {:.3}s)",
+                            "[{}/{}] failed: {} ({}, {:.3}s)",
                             jobs_completed,
                             total_jobs,
                             outcome.job_name,
@@ -289,7 +289,7 @@ pub fn run_candidate_check(
                         );
                     } else {
                         println!(
-                            "[{}/{}] Job passed: {} ({:.3}s)",
+                            "[{}/{}] passed: {} ({:.3}s)",
                             jobs_completed, total_jobs, outcome.job_name, duration_secs
                         );
                     }
