@@ -9,7 +9,10 @@ use std::time::Duration;
 /// Helper to get the selfci binary path
 fn selfci_bin() -> String {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    format!("{}/target/debug/selfci", manifest_dir)
+    let profile = std::env::var("CARGO_PROFILE").unwrap_or_else(|_| "debug".to_string());
+    // Cargo's "dev" profile outputs to "debug" directory
+    let dir = if profile == "dev" { "debug" } else { &profile };
+    format!("{}/target/{}/selfci", manifest_dir, dir)
 }
 
 /// Helper to wait for daemon to start

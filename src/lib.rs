@@ -62,7 +62,45 @@ pub fn copy_revisions_to_workdirs(
 ) -> Result<(), VCSOperationError> {
     match vcs {
         VCS::Jujutsu => {
-            // Export jj changes to the underlying git repo once
+            // Generate unique suffix for temporary bookmark names (pid + timestamp)
+            let suffix = format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            let base_bookmark = format!("selfci-export-base-{}", suffix);
+            let candidate_bookmark = format!("selfci-export-candidate-{}", suffix);
+
+            // Create temporary bookmarks for the revisions we need to export
+            // (jj git export only exports commits reachable from bookmarks)
+            cmd!(
+                "jj",
+                "bookmark",
+                "create",
+                "-r",
+                base_revision.as_str(),
+                &base_bookmark
+            )
+            .dir(root_dir)
+            .run()
+            .map_err(VCSOperationError::CommandFailed)?;
+
+            cmd!(
+                "jj",
+                "bookmark",
+                "create",
+                "-r",
+                candidate_revision.as_str(),
+                &candidate_bookmark
+            )
+            .dir(root_dir)
+            .run()
+            .map_err(VCSOperationError::CommandFailed)?;
+
+            // Export jj changes to the underlying git repo
             cmd!("jj", "git", "export", "--quiet")
                 .dir(root_dir)
                 .run()
@@ -92,6 +130,15 @@ pub fn copy_revisions_to_workdirs(
                 git_dir,
                 clone_mode,
             )?;
+
+            // Delete the temporary bookmarks (cleanup)
+            let _ = cmd!("jj", "bookmark", "delete", &base_bookmark)
+                .dir(root_dir)
+                .run();
+
+            let _ = cmd!("jj", "bookmark", "delete", &candidate_bookmark)
+                .dir(root_dir)
+                .run();
 
             Ok(())
         }

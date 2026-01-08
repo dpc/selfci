@@ -100,7 +100,7 @@ job:
         "Should show job name is 'main'"
     );
     assert!(
-        output.contains("Job passed: main") || output.contains("Job started: main"),
+        output.contains("passed: main") || output.contains("started: main"),
         "Should show job status"
     );
 }
@@ -177,12 +177,9 @@ job:
     println!("Output:\n{}", output);
 
     // Verify output contains expected messages
+    assert!(output.contains("started: main"), "Should show job started");
     assert!(
-        output.contains("Job started: main"),
-        "Should show job started"
-    );
-    assert!(
-        output.contains("Job passed: main") || output.contains("Job failed: main"),
+        output.contains("passed: main") || output.contains("failed: main"),
         "Should show job completion"
     );
 }
@@ -247,7 +244,7 @@ job:
 
     // Should fail due to step failure
     assert!(
-        output.contains("Job failed: main"),
+        output.contains("failed: main"),
         "Job should fail due to step failure"
     );
     assert!(
@@ -319,7 +316,7 @@ job:
 
     // Should pass because failure was ignored
     assert!(
-        output.contains("Job passed: main"),
+        output.contains("passed: main"),
         "Job should pass with ignored failure"
     );
     assert!(
@@ -384,12 +381,9 @@ job:
 
     println!("Output:\n{}", output);
 
+    assert!(output.contains("started: main"), "Should show job started");
     assert!(
-        output.contains("Job started: main"),
-        "Should show job started"
-    );
-    assert!(
-        output.contains("Job passed: main") || output.contains("Job failed: main"),
+        output.contains("passed: main") || output.contains("failed: main"),
         "Should show job completion"
     );
 }
@@ -744,7 +738,7 @@ job:
 
     // CRITICAL: The job should FAIL because the base config (strict) is used
     assert!(
-        output.contains("Job failed: main"),
+        output.contains("failed: main"),
         "Job should fail with strict base config. If it passes, config is being read from candidate (SECURITY ISSUE!)"
     );
     assert!(

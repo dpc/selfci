@@ -793,10 +793,18 @@ fn merge_candidate(
         }
         selfci::VCS::Jujutsu => {
             // Read config from base branch using jj file show
-            cmd!("jj", "file", "show", "-r", base_branch, &config_path)
-                .dir(root_dir)
-                .read()
-                .map_err(selfci::MergeError::ConfigReadFailed)?
+            cmd!(
+                "jj",
+                "--ignore-working-copy",
+                "file",
+                "show",
+                "-r",
+                base_branch,
+                &config_path
+            )
+            .dir(root_dir)
+            .read()
+            .map_err(selfci::MergeError::ConfigReadFailed)?
         }
     };
 
@@ -1015,6 +1023,7 @@ fn merge_candidate(
             merge_log.push_str("Updating working copy snapshot\n");
             let output = cmd!("jj", "workspace", "update-stale")
                 .dir(root_dir)
+                .stdin_null()
                 .stderr_to_stdout()
                 .read()
                 .map_err(selfci::MergeError::BranchUpdateFailed)?;
@@ -1030,59 +1039,38 @@ fn merge_candidate(
                 candidate.commit_id, base_branch
             ));
 
-            // Save the current @ change ID so we can restore it later
-            merge_log.push_str("Saving current working copy change ID\n");
-            let original_change_id = cmd!(
-                "jj",
-                "log",
-                "-r",
-                "@",
-                "-T",
-                "change_id",
-                "--no-graph",
-                "--color=never"
-            )
-            .dir(root_dir)
-            .read()
-            .map_err(selfci::MergeError::ChangeIdFailed)?
-            .trim()
-            .to_string();
-            merge_log.push_str(&format!("Original @ change ID: {}\n", original_change_id));
-
             // Create a new merge commit with both base and candidate as parents
-            // Use --ignore-working-copy to prevent updating the working directory
+            // Use --ignore-working-copy and --no-edit to avoid changing the working directory or @
             merge_log.push_str("Creating merge commit\n");
             let output = cmd!(
                 "jj",
                 "--ignore-working-copy",
                 "new",
+                "--no-edit",
                 base_branch,
                 candidate.commit_id.as_str()
             )
             .dir(root_dir)
+            .stdin_null()
             .stderr_to_stdout()
             .read()
             .map_err(selfci::MergeError::MergeFailed)?;
             merge_log.push_str(&output);
             merge_log.push('\n');
 
-            // Get the commit ID of the merge commit we just created (currently @)
-            merge_log.push_str("Getting merge commit ID\n");
-            let merge_commit_id = cmd!(
-                "jj",
-                "log",
-                "-r",
-                "@",
-                "-T",
-                "commit_id",
-                "--no-graph",
-                "--color=never"
-            )
-            .dir(root_dir)
-            .read()
-            .map_err(selfci::MergeError::ChangeIdFailed)?
-            .trim()
-            .to_string();
+            // Parse the output to get the merge commit ID
+            // Output format: "Created new commit <change_id> <commit_id> ..."
+            let merge_commit_id = output
+                .lines()
+                .find(|line| line.starts_with("Created new commit"))
+                .and_then(|line| line.split_whitespace().nth(3))
+                .ok_or_else(|| {
+                    selfci::MergeError::MergeFailed(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to parse merge commit ID from output: {}", output),
+                    ))
+                })?
+                .to_string();
             merge_log.push_str(&format!("Merge commit ID: {}\n", merge_commit_id));
 
             // Move the base branch bookmark to the merge commit first
@@ -1106,20 +1094,12 @@ fn merge_candidate(
             merge_log.push_str(&output);
             merge_log.push('\n');
 
-            // First update the working copy snapshot, then restore original @
+            // Update the working copy snapshot to avoid "stale working copy" errors
+            // Since we used --no-edit, @ didn't change, so the user's working copy remains intact
             merge_log.push_str("Updating working copy snapshot\n");
             let output = cmd!("jj", "workspace", "update-stale")
                 .dir(root_dir)
-                .stderr_to_stdout()
-                .read()
-                .map_err(selfci::MergeError::BranchUpdateFailed)?;
-            merge_log.push_str(&output);
-            merge_log.push('\n');
-
-            // Move @ back to the original change (this will update working directory files)
-            merge_log.push_str("Restoring original working copy\n");
-            let output = cmd!("jj", "edit", &original_change_id)
-                .dir(root_dir)
+                .stdin_null()
                 .stderr_to_stdout()
                 .read()
                 .map_err(selfci::MergeError::BranchUpdateFailed)?;

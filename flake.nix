@@ -59,6 +59,7 @@
           "Cargo.lock"
           "src"
           "share"
+          "tests"
           ".*\.rs"
         ];
 
@@ -81,7 +82,7 @@
                   craneLib'.overrideArgs {
                     pname = projectName;
                     src = buildSrc;
-                    nativeBuildInputs = [ ];
+                    nativeBuildInputs = with pkgs; [ ];
                   }
                 );
               in
@@ -99,6 +100,7 @@
 
                 tests = craneLib.cargoNextest {
                   cargoArtifacts = workspace;
+                    nativeBuildInputs = with pkgs; [ git jujutsu ];
                 };
 
                 clippy = craneLib.cargoClippy {
