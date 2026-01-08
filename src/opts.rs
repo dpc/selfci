@@ -114,6 +114,11 @@ pub enum MQCommands {
         #[arg(long)]
         no_merge: bool,
     },
+    /// Check a candidate without merging (alias for `add --no-merge`)
+    Check {
+        /// Candidate revision to check
+        candidate: String,
+    },
     /// List jobs in the merge queue
     List {
         /// Number of recent jobs to show

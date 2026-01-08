@@ -1145,9 +1145,7 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
                 None => {
                     eprintln!("Merge queue daemon is not running for this project");
                     eprintln!("Start it with: selfci mq start --base-branch <branch>");
-                    eprintln!(
-                        "Or set mq.base-branch in .config/selfci/ci.yaml for auto-start"
-                    );
+                    eprintln!("Or set mq.base-branch in .config/selfci/ci.yaml for auto-start");
                     return Err(MainError::CheckFailed);
                 }
             }

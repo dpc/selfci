@@ -253,6 +253,9 @@ fn main_inner() -> Result<(), MainError> {
             }) => {
                 cmd::mq::add_candidate(candidate, no_merge)?;
             }
+            Some(opts::MQCommands::Check { candidate }) => {
+                cmd::mq::add_candidate(candidate, true)?;
+            }
             Some(opts::MQCommands::List { limit }) => {
                 cmd::mq::list_jobs(limit)?;
             }
