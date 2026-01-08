@@ -3,6 +3,7 @@ use selfci::{
     read_config, revision::ResolvedRevision,
 };
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -186,22 +187,28 @@ pub fn run_candidate_check(
     let mut any_job_failed = false;
     let check_start = std::time::Instant::now();
 
+    // Helper macro to output based on mode: println for Inline, writeln to buffer for MergeQueue
+    macro_rules! output {
+        ($($arg:tt)*) => {
+            match mode {
+                CheckMode::Inline { .. } => println!($($arg)*),
+                CheckMode::MergeQueue => { let _ = writeln!(all_outputs, $($arg)*); }
+            }
+        };
+    }
+
     for message in messages_receiver {
         match message {
             super::worker::JobMessage::Started { job_name } => {
                 debug!(job = %job_name, "Started");
                 active_jobs += 1;
                 total_jobs += 1;
-
-                // Always print job status messages in Inline mode
-                if matches!(mode, CheckMode::Inline { .. }) {
-                    println!(
-                        "[{}/{}] started: {}",
-                        total_jobs - active_jobs,
-                        total_jobs,
-                        job_name
-                    );
-                }
+                output!(
+                    "[{}/{}] started: {}",
+                    total_jobs - active_jobs,
+                    total_jobs,
+                    job_name
+                );
             }
             super::worker::JobMessage::Completed(mut outcome) => {
                 debug!(job = %outcome.job_name, exit_code = ?outcome.exit_code, "completed");
@@ -223,18 +230,15 @@ pub fn run_candidate_check(
                     }
                 }
 
-                // Collect steps from all jobs
                 all_steps.extend(outcome.steps.clone());
 
-                // Check if job failed (either by exit code or by step failure)
                 let has_failed_step = outcome.steps.iter().any(|step| {
                     matches!(step.status, protocol::StepStatus::Failed { ignored: false })
                 });
 
-                let job_failed = if let Some(exit_code) = outcome.exit_code {
-                    exit_code != 0 || has_failed_step
-                } else {
-                    true
+                let job_failed = match outcome.exit_code {
+                    Some(code) => code != 0 || has_failed_step,
+                    None => true,
                 };
 
                 if job_failed {
@@ -254,77 +258,72 @@ pub fn run_candidate_check(
                     );
                 }
 
-                // Collect output based on mode:
-                // - MergeQueue: collect all output (for user visibility)
-                // - Inline: only collect output from failed jobs (to avoid noise)
-                let should_collect_output = match mode {
-                    CheckMode::MergeQueue => true,
-                    CheckMode::Inline { .. } => job_failed,
-                };
+                // Output job completion status
+                let jobs_completed = total_jobs - active_jobs + 1;
+                let duration_secs = outcome.duration.as_secs_f64();
 
-                if should_collect_output && !outcome.output.is_empty() {
-                    all_outputs.push_str(&outcome.output);
-                }
-
-                // Print job completion status and steps in Inline mode
-                if matches!(mode, CheckMode::Inline { .. }) {
-                    let duration_secs = outcome.duration.as_secs_f64();
-                    let jobs_completed = total_jobs - active_jobs + 1;
-
-                    if job_failed {
-                        let failure_reason = if has_failed_step {
-                            "step failure".to_string()
-                        } else if let Some(exit_code) = outcome.exit_code {
-                            format!("exit code: {}", exit_code)
-                        } else {
-                            "no exit code".to_string()
-                        };
-                        println!(
-                            "[{}/{}] failed: {} ({}, {:.3}s)",
-                            jobs_completed,
-                            total_jobs,
-                            outcome.job_name,
-                            failure_reason,
-                            duration_secs
-                        );
+                if job_failed {
+                    let reason = if has_failed_step {
+                        "step failure"
+                    } else if let Some(code) = outcome.exit_code {
+                        &format!("exit code: {}", code)
                     } else {
-                        println!(
-                            "[{}/{}] passed: {} ({:.3}s)",
-                            jobs_completed, total_jobs, outcome.job_name, duration_secs
-                        );
-                    }
-
-                    // Print steps for this job
-                    if !outcome.steps.is_empty() {
-                        for (i, step_entry) in outcome.steps.iter().enumerate() {
-                            let next_ts = if i + 1 < outcome.steps.len() {
-                                outcome.steps[i + 1].ts
-                            } else {
-                                step_entry.ts + outcome.duration
-                            };
-
-                            let step_duration = next_ts
-                                .duration_since(step_entry.ts)
-                                .unwrap_or(Duration::ZERO);
-
-                            let status_emoji = match &step_entry.status {
-                                protocol::StepStatus::Success => "✅",
-                                protocol::StepStatus::Failed { ignored: true } => "⚠️",
-                                protocol::StepStatus::Failed { ignored: false } => "❌",
-                                protocol::StepStatus::Running => "⏳",
-                            };
-
-                            println!(
-                                "  {} {} ({:.3}s)",
-                                status_emoji,
-                                step_entry.name,
-                                step_duration.as_secs_f64()
-                            );
-                        }
-                    }
+                        "no exit code"
+                    };
+                    output!(
+                        "[{}/{}] failed: {} ({}, {:.3}s)",
+                        jobs_completed,
+                        total_jobs,
+                        outcome.job_name,
+                        reason,
+                        duration_secs
+                    );
+                } else {
+                    output!(
+                        "[{}/{}] passed: {} ({:.3}s)",
+                        jobs_completed,
+                        total_jobs,
+                        outcome.job_name,
+                        duration_secs
+                    );
                 }
 
-                // Decrement active jobs and check if we're done
+                // Output steps
+                for (i, step) in outcome.steps.iter().enumerate() {
+                    let next_ts = outcome
+                        .steps
+                        .get(i + 1)
+                        .map_or(step.ts + outcome.duration, |s| s.ts);
+                    let step_duration = next_ts.duration_since(step.ts).unwrap_or(Duration::ZERO);
+                    let emoji = match &step.status {
+                        protocol::StepStatus::Success => "✅",
+                        protocol::StepStatus::Failed { ignored: true } => "⚠️",
+                        protocol::StepStatus::Failed { ignored: false } => "❌",
+                        protocol::StepStatus::Running => "⏳",
+                    };
+                    output!(
+                        "  {} {} ({:.3}s)",
+                        emoji,
+                        step.name,
+                        step_duration.as_secs_f64()
+                    );
+                }
+
+                // Output command output with header/trailer
+                let should_output = match mode {
+                    CheckMode::MergeQueue => true,
+                    CheckMode::Inline { print_output } => print_output || job_failed,
+                };
+                if should_output && !outcome.output.is_empty() {
+                    output!("--- output: {} ---", outcome.job_name);
+                    // For MergeQueue, append to buffer; for Inline, print directly
+                    match mode {
+                        CheckMode::MergeQueue => all_outputs.push_str(&outcome.output),
+                        CheckMode::Inline { .. } => print!("{}", outcome.output),
+                    }
+                    output!("--- end output ---");
+                }
+
                 active_jobs -= 1;
                 if active_jobs == 0 {
                     break;
@@ -415,11 +414,6 @@ pub fn check(
         forced_vcs,
         CheckMode::Inline { print_output },
     )?;
-
-    // Print output on failure if we weren't already printing it in real-time
-    if !print_output && !result.output.is_empty() {
-        println!("{}", result.output);
-    }
 
     // Print total time
     debug!(
