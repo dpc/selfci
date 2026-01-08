@@ -162,6 +162,21 @@ fn resolve_base_branch(base_branch: Option<String>, root_dir: &Path) -> Result<S
     }
 }
 
+/// Try to resolve base branch from config only (no CLI arg), quietly without printing errors
+/// Returns Some(branch) if config has base-branch, None otherwise
+fn try_resolve_base_branch_from_config(root_dir: &Path) -> Option<String> {
+    let config = selfci::config::read_config(root_dir).ok()?;
+    config.mq?.base_branch
+}
+
+/// Result of daemonize_background indicating whether we're in parent or child process
+enum DaemonizeResult {
+    /// Parent process - daemon_dir where child daemon is running
+    Parent(PathBuf),
+    /// Child process - daemon_dir where we should run the daemon
+    Child(PathBuf),
+}
+
 /// Check if a daemon is already running for this project and print info if so
 fn check_daemon_already_running(root_dir: &Path) -> Result<bool, MainError> {
     if let Some(existing_dir) = get_daemon_runtime_dir(root_dir)?
@@ -178,13 +193,14 @@ fn check_daemon_already_running(root_dir: &Path) -> Result<bool, MainError> {
 }
 
 /// Daemonize the process in background mode
-/// Forks the process, sets up session, redirects I/O, and returns daemon directory path
+/// Forks the process, sets up session, redirects I/O
+/// Returns DaemonizeResult::Parent in parent process, DaemonizeResult::Child in child process
 fn daemonize_background(
     root_dir: &Path,
     daemon_dir_initial: PathBuf,
     log_file: Option<PathBuf>,
     base_branch: &str,
-) -> Result<PathBuf, MainError> {
+) -> Result<DaemonizeResult, MainError> {
     // Background mode - manual fork so we can report PID back to parent
     println!("Base branch: {}", base_branch);
 
@@ -195,14 +211,17 @@ fn daemonize_background(
     // Manual fork (instead of using daemonize crate, so parent can read from pipe)
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child: _ }) => {
-            // Parent process - read daemon dir from pipe and print it
+            // Parent process - read daemon dir from pipe and return
             drop(writer);
 
             let reader = std::io::BufReader::new(reader);
             if let Ok(Some(daemon_dir)) = reader.lines().next().transpose() {
                 println!("Runtime directory: {}", daemon_dir);
+                Ok(DaemonizeResult::Parent(PathBuf::from(daemon_dir)))
+            } else {
+                eprintln!("Failed to read daemon directory from child process");
+                Err(MainError::CheckFailed)
             }
-            std::process::exit(0);
         }
         Err(e) => {
             eprintln!("Failed to fork: {}", e);
@@ -303,19 +322,19 @@ fn daemonize_background(
             eprintln!("PID: {}", pid);
             eprintln!("Runtime directory: {}", daemon_dir.display());
             debug!("Daemon initialization complete");
-            Ok(daemon_dir)
+            Ok(DaemonizeResult::Child(daemon_dir))
         }
     }
 }
 
 /// Initialize the daemon runtime directory and daemonize the process if in background mode
-/// Returns the daemon directory path
+/// Returns DaemonizeResult indicating whether we're parent (should not run daemon loop) or child/foreground (should run daemon loop)
 fn initialize_daemon_dir(
     root_dir: &Path,
     foreground: bool,
     log_file: Option<PathBuf>,
     base_branch: &str,
-) -> Result<PathBuf, MainError> {
+) -> Result<DaemonizeResult, MainError> {
     // Determine initial daemon directory (may be modified after fork in background mode)
     let daemon_dir_initial = if let Ok(explicit_dir) = std::env::var(envs::SELFCI_MQ_RUNTIME_DIR) {
         // Mode 1: Use explicit directory
@@ -329,7 +348,7 @@ fn initialize_daemon_dir(
     if !foreground {
         daemonize_background(root_dir, daemon_dir_initial, log_file, base_branch)
     } else {
-        // Foreground mode - simpler
+        // Foreground mode - simpler, treat as "child" since we run the daemon loop
         let pid = std::process::id();
         let daemon_dir = if daemon_dir_initial.as_os_str().is_empty() {
             get_selfci_runtime_dir()?.join(pid.to_string())
@@ -351,7 +370,7 @@ fn initialize_daemon_dir(
             base_branch
         );
         println!("Runtime directory: {}", daemon_dir.display());
-        Ok(daemon_dir)
+        Ok(DaemonizeResult::Child(daemon_dir))
     }
 }
 
@@ -368,8 +387,70 @@ pub fn start_daemon(
         return Ok(());
     }
 
-    let daemon_dir = initialize_daemon_dir(&root_dir, foreground, log_file, &base_branch)?;
+    let result = initialize_daemon_dir(&root_dir, foreground, log_file, &base_branch)?;
 
+    // Handle parent vs child process
+    let daemon_dir = match result {
+        DaemonizeResult::Parent(_) => {
+            // Parent process in background mode - exit now, child will run the daemon
+            std::process::exit(0);
+        }
+        DaemonizeResult::Child(dir) => dir,
+    };
+
+    run_daemon_loop(daemon_dir, root_dir, base_branch)
+}
+
+/// Auto-start daemon in background if config has base-branch set
+/// Returns Ok(Some(daemon_dir)) if started successfully, Ok(None) if cannot auto-start
+pub fn auto_start_daemon(root_dir: &Path) -> Result<Option<PathBuf>, MainError> {
+    // Try to resolve base branch from config (not CLI)
+    let base_branch = match try_resolve_base_branch_from_config(root_dir) {
+        Some(branch) => branch,
+        None => return Ok(None), // Can't auto-start without config
+    };
+
+    // Check if already running
+    if get_daemon_runtime_dir(root_dir)?.is_some() {
+        // Already running, nothing to do
+        return Ok(None);
+    }
+
+    println!("Auto-starting merge queue daemon...");
+
+    let result = initialize_daemon_dir(root_dir, false, None, &base_branch)?;
+
+    match result {
+        DaemonizeResult::Parent(daemon_dir) => {
+            // Parent process - wait for daemon to be ready and return
+            let socket_path = daemon_dir.join("mq.sock");
+            for _ in 0..50 {
+                // Wait up to 5 seconds
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if socket_path.exists()
+                    && let Ok(mq_protocol::MQResponse::HelloAck) =
+                        mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Hello)
+                {
+                    return Ok(Some(daemon_dir));
+                }
+            }
+            eprintln!("Warning: Daemon started but not responding");
+            Ok(Some(daemon_dir))
+        }
+        DaemonizeResult::Child(daemon_dir) => {
+            // Child process - run the daemon loop (never returns)
+            let _ = run_daemon_loop(daemon_dir, root_dir.to_path_buf(), base_branch);
+            std::process::exit(0);
+        }
+    }
+}
+
+/// Run the daemon main loop (socket listener, request handler, etc.)
+fn run_daemon_loop(
+    daemon_dir: PathBuf,
+    root_dir: PathBuf,
+    base_branch: String,
+) -> Result<(), MainError> {
     // Set up cleanup on exit - remove entire daemon directory
     let daemon_dir_cleanup = daemon_dir.clone();
     let _guard = scopeguard::guard((), move |_| {
@@ -1054,11 +1135,24 @@ fn merge_candidate(
 pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
-    let daemon_dir = get_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
-        eprintln!("Merge queue daemon is not running for this project");
-        eprintln!("Start it with: selfci mq start --base-branch <branch>");
-        MainError::CheckFailed
-    })?;
+    // Try to get existing daemon, or auto-start if config has base-branch
+    let daemon_dir = match get_daemon_runtime_dir(&root_dir)? {
+        Some(dir) => dir,
+        None => {
+            // Daemon not running - try to auto-start if config is available
+            match auto_start_daemon(&root_dir)? {
+                Some(dir) => dir,
+                None => {
+                    eprintln!("Merge queue daemon is not running for this project");
+                    eprintln!("Start it with: selfci mq start --base-branch <branch>");
+                    eprintln!(
+                        "Or set mq.base-branch in .config/selfci/ci.yaml for auto-start"
+                    );
+                    return Err(MainError::CheckFailed);
+                }
+            }
+        }
+    };
 
     let socket_path = daemon_dir.join("mq.sock");
 
