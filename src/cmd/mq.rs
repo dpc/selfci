@@ -1212,10 +1212,10 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
                 println!("No jobs in queue");
             } else {
                 println!(
-                    "{:<6} {:<10} {:<40} {:<20}",
-                    "ID", "Status", "Candidate", "Queued"
+                    "{:<6} {:<10} {:<12} {:<10} {:<20} {:<20}",
+                    "ID", "Status", "Change", "Commit", "Candidate", "Queued"
                 );
-                println!("{}", "-".repeat(80));
+                println!("{}", "-".repeat(82));
                 for job in jobs {
                     let status = match job.status {
                         mq_protocol::MQJobStatus::Queued => "Queued",
@@ -1225,10 +1225,17 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
                     };
 
                     let queued = humantime::format_rfc3339_seconds(job.queued_at);
+                    // Shorten change_id and commit_id to first 8 chars
+                    let change_short = &job.candidate.change_id.as_str()
+                        [..job.candidate.change_id.as_str().len().min(8)];
+                    let commit_short = &job.candidate.commit_id.as_str()
+                        [..job.candidate.commit_id.as_str().len().min(8)];
                     println!(
-                        "{:<6} {:<10} {:<40} {:<20}",
+                        "{:<6} {:<10} {:<12} {:<10} {:<20} {:<20}",
                         job.id,
                         status,
+                        change_short,
+                        commit_short,
                         job.candidate.user.as_str(),
                         queued
                     );

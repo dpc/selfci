@@ -54,6 +54,10 @@ pub enum Commands {
     Mq {
         #[command(subcommand)]
         command: Option<MQCommands>,
+
+        /// Run ID to query status (shortcut for `mq status <id>`)
+        #[arg(value_name = "RUN_ID")]
+        run_id: Option<u64>,
     },
 }
 

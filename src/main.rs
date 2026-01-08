@@ -239,7 +239,7 @@ fn main_inner() -> Result<(), MainError> {
                 }
             }
         }
-        Commands::Mq { command } => match command {
+        Commands::Mq { command, run_id } => match command {
             Some(opts::MQCommands::Start {
                 base_branch,
                 foreground,
@@ -260,8 +260,12 @@ fn main_inner() -> Result<(), MainError> {
                 cmd::mq::list_jobs(limit)?;
             }
             None => {
-                // Default to list when no subcommand is provided
-                cmd::mq::list_jobs(None)?;
+                // If run_id provided, show status; otherwise list jobs
+                if let Some(id) = run_id {
+                    cmd::mq::get_status(id)?;
+                } else {
+                    cmd::mq::list_jobs(None)?;
+                }
             }
             Some(opts::MQCommands::Status { run_id: job_id }) => {
                 cmd::mq::get_status(job_id)?;
