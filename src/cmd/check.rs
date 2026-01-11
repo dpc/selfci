@@ -425,15 +425,13 @@ pub fn check(
     let vcs = get_vcs(&root_dir, forced_vcs)?;
     debug!(vcs = ?vcs, root_dir = %root_dir.display(), forced = forced_vcs.is_some(), "Using VCS");
 
-    // Use VCS-specific defaults for base and candidate if not provided
-    let base_rev_str = base.as_deref().unwrap_or(match vcs {
-        selfci::VCS::Jujutsu => "@",
-        selfci::VCS::Git => "HEAD",
-    });
+    // Use VCS-specific defaults for candidate if not provided
     let candidate_rev_str = candidate.as_deref().unwrap_or(match vcs {
         selfci::VCS::Jujutsu => "@",
         selfci::VCS::Git => "HEAD",
     });
+    // Base defaults to the same as candidate if not provided
+    let base_rev_str = base.as_deref().unwrap_or(candidate_rev_str);
 
     // Resolve revisions to immutable IDs
     let resolved_base = selfci::revision::resolve_revision(&vcs, &root_dir, base_rev_str)?;
