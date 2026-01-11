@@ -80,6 +80,7 @@ pub fn copy_revisions_to_workdirs(
                 "jj",
                 "bookmark",
                 "create",
+                "--quiet",
                 "-r",
                 base_revision.as_str(),
                 &base_bookmark
@@ -92,6 +93,7 @@ pub fn copy_revisions_to_workdirs(
                 "jj",
                 "bookmark",
                 "create",
+                "--quiet",
                 "-r",
                 candidate_revision.as_str(),
                 &candidate_bookmark
@@ -132,11 +134,11 @@ pub fn copy_revisions_to_workdirs(
             )?;
 
             // Delete the temporary bookmarks (cleanup)
-            let _ = cmd!("jj", "bookmark", "delete", &base_bookmark)
+            let _ = cmd!("jj", "bookmark", "delete", "--quiet", &base_bookmark)
                 .dir(root_dir)
                 .run();
 
-            let _ = cmd!("jj", "bookmark", "delete", &candidate_bookmark)
+            let _ = cmd!("jj", "bookmark", "delete", "--quiet", &candidate_bookmark)
                 .dir(root_dir)
                 .run();
 
