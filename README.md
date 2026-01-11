@@ -4,7 +4,12 @@ SelfCI is a minimalistic local-first Unix-philosophy-abiding CI.
 
 ### Status
 
-Just started hacking on it recently, and all details can still change.
+It is fully working for my use cases of defining and running CI checks locally.
+It still fresh though, details might change.
+
+My favourite part is being able to run `selfci mq start <id>` and have the
+merge-queue daemon run the CI and merge the change into trunk without
+me having to baby-sit anything.
 
 Feel free to join [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw)
 and I'm happy to hear your feedback and thoughts on the matter.
