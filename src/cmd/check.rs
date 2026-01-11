@@ -136,6 +136,7 @@ pub fn run_candidate_check(
     let used_job_names_clone = Arc::clone(&used_job_names);
     let job_completions_clone = Arc::clone(&job_completions);
     let jobs_sender_clone = jobs_sender.clone();
+    let messages_sender_clone = messages_sender.clone();
     let spawn_context = super::worker::JobSpawnContext {
         base_dir: base_workdir.path().to_path_buf(),
         candidate_dir: candidate_workdir.path().to_path_buf(),
@@ -151,6 +152,7 @@ pub fn run_candidate_check(
             used_job_names_clone,
             job_completions_clone,
             jobs_sender_clone,
+            messages_sender_clone,
             spawn_context,
         );
     });
@@ -187,6 +189,9 @@ pub fn run_candidate_check(
     let mut any_job_failed = false;
     let check_start = std::time::Instant::now();
 
+    // Track step start times for duration calculation
+    let mut step_start_times: HashMap<(String, String), std::time::Instant> = HashMap::new();
+
     // Helper macro to output based on mode: println for Inline, writeln to buffer for MergeQueue
     macro_rules! output {
         ($($arg:tt)*) => {
@@ -204,10 +209,52 @@ pub fn run_candidate_check(
                 active_jobs += 1;
                 total_jobs += 1;
                 output!(
-                    "[{}/{}] started: {}",
+                    "[{}/{}] 🚀 started: {}",
                     total_jobs - active_jobs,
                     total_jobs,
                     job_name
+                );
+            }
+            super::worker::JobMessage::StepStarted {
+                job_name,
+                step_name,
+            } => {
+                debug!(job = %job_name, step = %step_name, "Step started");
+                step_start_times.insert(
+                    (job_name.clone(), step_name.clone()),
+                    std::time::Instant::now(),
+                );
+            }
+            super::worker::JobMessage::StepCompleted {
+                job_name,
+                step_name,
+                status,
+            } => {
+                debug!(job = %job_name, step = %step_name, ?status, "Step completed");
+                let jobs_completed = total_jobs - active_jobs;
+                let duration = step_start_times
+                    .remove(&(job_name.clone(), step_name.clone()))
+                    .map(|start| start.elapsed())
+                    .unwrap_or(Duration::ZERO);
+                let emoji = match &status {
+                    protocol::StepStatus::Success => "✅",
+                    protocol::StepStatus::Failed { ignored: true } => "⚠️",
+                    protocol::StepStatus::Failed { ignored: false } => "❌",
+                    protocol::StepStatus::Running => "⏳",
+                };
+                output!(
+                    "[{}/{}] {} {}: {} / {} ({:.3}s)",
+                    jobs_completed,
+                    total_jobs,
+                    emoji,
+                    if matches!(status, protocol::StepStatus::Success) {
+                        "passed"
+                    } else {
+                        "failed"
+                    },
+                    job_name,
+                    step_name,
+                    duration.as_secs_f64()
                 );
             }
             super::worker::JobMessage::Completed(mut outcome) => {
@@ -227,6 +274,36 @@ pub fn run_candidate_check(
                                 step
                             })
                             .collect();
+                    }
+                }
+
+                // Output completion for the last running step (if any)
+                if let Some(last_step) = outcome.steps.last() {
+                    // Check if we have a start time for this step (meaning it wasn't already completed)
+                    let key = (outcome.job_name.clone(), last_step.name.clone());
+                    if let Some(start) = step_start_times.remove(&key) {
+                        let duration = start.elapsed();
+                        let jobs_completed = total_jobs - active_jobs;
+                        let emoji = match &last_step.status {
+                            protocol::StepStatus::Success => "✅",
+                            protocol::StepStatus::Failed { ignored: true } => "⚠️",
+                            protocol::StepStatus::Failed { ignored: false } => "❌",
+                            protocol::StepStatus::Running => "⏳",
+                        };
+                        output!(
+                            "[{}/{}] {} {}: {} / {} ({:.3}s)",
+                            jobs_completed,
+                            total_jobs,
+                            emoji,
+                            if matches!(last_step.status, protocol::StepStatus::Success) {
+                                "passed"
+                            } else {
+                                "failed"
+                            },
+                            outcome.job_name,
+                            last_step.name,
+                            duration.as_secs_f64()
+                        );
                     }
                 }
 
@@ -261,6 +338,7 @@ pub fn run_candidate_check(
                 // Output job completion status
                 let jobs_completed = total_jobs - active_jobs + 1;
                 let duration_secs = outcome.duration.as_secs_f64();
+                let emoji = if job_failed { "❌" } else { "✅" };
 
                 if job_failed {
                     let reason = if has_failed_step {
@@ -271,41 +349,22 @@ pub fn run_candidate_check(
                         "no exit code"
                     };
                     output!(
-                        "[{}/{}] failed: {} ({}, {:.3}s)",
+                        "[{}/{}] {} failed: {} ({}, {:.3}s)",
                         jobs_completed,
                         total_jobs,
+                        emoji,
                         outcome.job_name,
                         reason,
                         duration_secs
                     );
                 } else {
                     output!(
-                        "[{}/{}] passed: {} ({:.3}s)",
+                        "[{}/{}] {} passed: {} ({:.3}s)",
                         jobs_completed,
                         total_jobs,
+                        emoji,
                         outcome.job_name,
                         duration_secs
-                    );
-                }
-
-                // Output steps
-                for (i, step) in outcome.steps.iter().enumerate() {
-                    let next_ts = outcome
-                        .steps
-                        .get(i + 1)
-                        .map_or(step.ts + outcome.duration, |s| s.ts);
-                    let step_duration = next_ts.duration_since(step.ts).unwrap_or(Duration::ZERO);
-                    let emoji = match &step.status {
-                        protocol::StepStatus::Success => "✅",
-                        protocol::StepStatus::Failed { ignored: true } => "⚠️",
-                        protocol::StepStatus::Failed { ignored: false } => "❌",
-                        protocol::StepStatus::Running => "⏳",
-                    };
-                    output!(
-                        "  {} {} ({:.3}s)",
-                        emoji,
-                        step.name,
-                        step_duration.as_secs_f64()
                     );
                 }
 

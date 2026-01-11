@@ -27,8 +27,19 @@ pub struct RunJobOutcome {
 }
 
 pub enum JobMessage {
-    Started { job_name: String },
+    Started {
+        job_name: String,
+    },
     Completed(RunJobOutcome),
+    StepStarted {
+        job_name: String,
+        step_name: String,
+    },
+    StepCompleted {
+        job_name: String,
+        step_name: String,
+        status: protocol::StepStatus,
+    },
 }
 
 /// Capture output from a reader, optionally printing to stdout in real-time
@@ -170,6 +181,7 @@ pub fn control_socket_listener(
     used_job_names: Arc<Mutex<std::collections::HashSet<String>>>,
     job_completions: Arc<Mutex<HashMap<String, protocol::JobStatus>>>,
     jobs_sender: mpsc::Sender<RunJobRequest>,
+    messages_sender: mpsc::Sender<JobMessage>,
     spawn_context: JobSpawnContext,
 ) {
     loop {
@@ -179,6 +191,7 @@ pub fn control_socket_listener(
                 let used_job_names_clone = Arc::clone(&used_job_names);
                 let job_completions_clone = Arc::clone(&job_completions);
                 let jobs_sender_clone = jobs_sender.clone();
+                let messages_sender_clone = messages_sender.clone();
                 let spawn_context_clone = spawn_context.clone();
 
                 std::thread::spawn(move || {
@@ -270,16 +283,38 @@ pub fn control_socket_listener(
                             } => {
                                 let ts = std::time::SystemTime::now();
 
-                                let entry = protocol::StepLogEntry {
-                                    ts,
-                                    name: step_name.clone(),
-                                    status: protocol::StepStatus::Running,
-                                };
-
+                                // Check if there's a previous Running step and complete it
                                 {
                                     let mut steps = job_steps_clone.lock().unwrap();
-                                    steps.entry(job_name.clone()).or_default().push(entry);
+                                    let job_steps_vec = steps.entry(job_name.clone()).or_default();
+
+                                    if let Some(prev_step) = job_steps_vec.last_mut() {
+                                        if matches!(prev_step.status, protocol::StepStatus::Running)
+                                        {
+                                            prev_step.status = protocol::StepStatus::Success;
+                                            let _ = messages_sender_clone.send(
+                                                JobMessage::StepCompleted {
+                                                    job_name: job_name.clone(),
+                                                    step_name: prev_step.name.clone(),
+                                                    status: protocol::StepStatus::Success,
+                                                },
+                                            );
+                                        }
+                                    }
+
+                                    let entry = protocol::StepLogEntry {
+                                        ts,
+                                        name: step_name.clone(),
+                                        status: protocol::StepStatus::Running,
+                                    };
+                                    job_steps_vec.push(entry);
                                 }
+
+                                // Send StepStarted message
+                                let _ = messages_sender_clone.send(JobMessage::StepStarted {
+                                    job_name: job_name.clone(),
+                                    step_name: step_name.clone(),
+                                });
 
                                 let _ = protocol::write_response(
                                     &mut stream,
@@ -292,9 +327,20 @@ pub fn control_socket_listener(
                                 let mut steps = job_steps_clone.lock().unwrap();
                                 if let Some(job_steps) = steps.get_mut(&job_name) {
                                     if let Some(last_step) = job_steps.last_mut() {
-                                        last_step.status =
+                                        let status =
                                             protocol::StepStatus::Failed { ignored: ignore };
-                                        debug!(job = %job_name, step = %last_step.name, ignore, "Step marked as failed");
+                                        last_step.status = status.clone();
+                                        let step_name = last_step.name.clone();
+                                        debug!(job = %job_name, step = %step_name, ignore, "Step marked as failed");
+
+                                        // Send StepCompleted message with failed status
+                                        let _ =
+                                            messages_sender_clone.send(JobMessage::StepCompleted {
+                                                job_name: job_name.clone(),
+                                                step_name,
+                                                status,
+                                            });
+
                                         let _ = protocol::write_response(
                                             &mut stream,
                                             protocol::JobControlResponse::StepMarkedFailed,
