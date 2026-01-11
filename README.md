@@ -56,6 +56,62 @@ CI rules however you want.
 * Flexible security model.
 * Bring-your-own-isolation.
 
+### Quick look
+
+Here is an example of how SelfCI works:
+
+```
+> selfci check
+Starting check candidate=@ commit="b281094a"
+[0/1] 🚀 started: main
+[0/2] 🚀 started: lint
+[0/3] 🚀 started: cargo
+[0/3] ✅ passed: cargo / cargo.lock up to date (0.127s)
+[0/3] ✅ passed: lint / check leftover dbg! (0.002s)
+[0/3] ✅ passed: lint / nixfmt (0.002s)
+[0/3] ✅ passed: lint / cargo fmt (0.063s)
+[1/3] ✅ passed: lint (0.429s)
+[1/3] ✅ passed: cargo / build (1.193s)
+[1/3] ✅ passed: cargo / clippy (1.129s)
+[1/3] ✅ passed: cargo / nextest (0.095s)
+[2/3] ✅ passed: cargo (2.552s)
+[3/3] ✅ passed: main (2.613s)
+
+> selfci mq check @
+Added to merge queue with job ID: 2 (no-merge mode)
+
+> selfci mq
+ID     Status     Change       Commit     Candidate            Queued
+----------------------------------------------------------------------------------
+2      Passed     looloxup     b281094a   @                    2026-01-11T23:15:16Z
+1      Passed     ptkypzxy     37decc62   @-                   2026-01-11T22:54:17Z
+> selfci mq 2
+Run ID: 2
+Candidate: @ (commit: b281094a15e6d73e210f07009cda74f6c2b35a61)
+Status: Passed
+Queued at: 2026-01-11T23:15:16Z
+Started at: 2026-01-11T23:15:16Z
+Completed at: 2026-01-11T23:15:16Z
+
+Output:
+[0/1] 🚀 started: main
+[0/2] 🚀 started: lint
+[0/3] 🚀 started: cargo
+[0/3] ✅ passed: cargo / cargo.lock up to date (0.126s)
+[0/3] ✅ passed: cargo / build (0.104s)
+[0/3] ✅ passed: cargo / clippy (0.102s)
+[0/3] ✅ passed: lint / check leftover dbg! (0.001s)
+[0/3] ✅ passed: lint / nixfmt (0.002s)
+[0/3] ✅ passed: lint / cargo fmt (0.065s)
+[1/3] ✅ passed: lint (0.423s)
+--- output: lint ---
+💡 Run 'just' for a list of available 'just ...' helper recipes
+environment: line 2: warning: command substitution: ignored null byte in input
+--- end output ---
+[1/3] ✅ passed: cargo / nextest (0.108s)
+[2/3] ✅ passed: cargo (0.446s)
+[3/3] ✅ passed: main (0.512s)
+```
 
 ### SelfCI CI rules
 
