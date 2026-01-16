@@ -256,6 +256,11 @@ forbidding changes to certain files, or cryptographic
 signatures, etc. allowing building more automated, yet
 secure CI policies with full flexibility.
 
+### Installing
+
+You can install it via cargo (`cargo install selfci`) or using Nix Flakes
+(e.g. `nix run git+https://radicle.dpc.pw/z2tDzYbAXxTQEKTGFVwiJPajkbeDU.git`)
+.
 
 ### Future: "scaling-out"
 
