@@ -2,6 +2,15 @@
 name = "selfci"
 version = "0.1.0"
 edition = "2024"
+description = "SelfCI is a minimalistic local-first Unix-philosophy-abiding CI."
+license = "MPL-2.0"
+repository = "https://app.radicle.xyz/nodes/radicle.dpc.pw/rad:z2tDzYbAXxTQEKTGFVwiJPajkbeDU"
+homepage = "https://app.radicle.xyz/nodes/radicle.dpc.pw/rad:z2tDzYbAXxTQEKTGFVwiJPajkbeDU"
+readme = "README.md"
+keywords = ["ci"]
+categories = ["development-tools"]
+authors = ["dpc <dpc@dpc.pw>"]
+rust-version = "1.92"
 
 [[bin]]
 name = "selfci"
