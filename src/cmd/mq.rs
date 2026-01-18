@@ -763,7 +763,12 @@ fn process_queue(
                             "MQ candidate check {} passed, merging into {}",
                             job_info.id, base_branch
                         );
-                        match merge_candidate(&root_dir, &base_branch, &job_info.candidate) {
+                        match merge_candidate(
+                            &root_dir,
+                            &base_branch,
+                            &job_info.candidate,
+                            &job_info.output,
+                        ) {
                             Ok(merge_log) => {
                                 // Append merge output with separator
                                 job_info.output.push_str("\n\n=== Merge Output ===\n");
@@ -877,6 +882,7 @@ fn merge_candidate_git_merge(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
+    test_output: &str,
 ) -> Result<String, selfci::MergeError> {
     let mut merge_log = String::new();
 
@@ -915,13 +921,27 @@ fn merge_candidate_git_merge(
             .run();
     });
 
-    // In the worktree, merge candidate
+    // In the worktree, merge candidate with a custom message
     merge_log.push_str(&format!("Merging {} with --no-ff\n", candidate.commit_id));
-    let output = cmd!("git", "merge", "--no-ff", candidate.commit_id.as_str())
-        .dir(&temp_worktree)
-        .stderr_to_stdout()
-        .read()
-        .map_err(selfci::MergeError::MergeFailed)?;
+
+    // Build the merge commit message
+    let merge_message = format!(
+        "Merge commit '{}' by SelfCI\n\n=== Check Output ===\n{}",
+        candidate.commit_id, test_output
+    );
+
+    let output = cmd!(
+        "git",
+        "merge",
+        "--no-ff",
+        "-m",
+        &merge_message,
+        candidate.commit_id.as_str()
+    )
+    .dir(&temp_worktree)
+    .stderr_to_stdout()
+    .read()
+    .map_err(selfci::MergeError::MergeFailed)?;
     merge_log.push_str(&output);
     merge_log.push('\n');
 
@@ -1037,6 +1057,7 @@ fn merge_candidate_jj_merge(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
+    test_output: &str,
 ) -> Result<String, selfci::MergeError> {
     let mut merge_log = String::new();
 
@@ -1080,6 +1101,28 @@ fn merge_candidate_jj_merge(
         .to_string();
     merge_log.push_str(&format!("Merge commit ID: {}\n", merge_commit_id));
 
+    // Set the merge commit description
+    let merge_message = format!(
+        "Merge commit '{}' by SelfCI\n\n=== Check Output ===\n{}",
+        candidate.commit_id, test_output
+    );
+    merge_log.push_str("Setting merge commit description\n");
+    let output = cmd!(
+        "jj",
+        "--ignore-working-copy",
+        "describe",
+        "-r",
+        &merge_commit_id,
+        "-m",
+        &merge_message
+    )
+    .dir(root_dir)
+    .stderr_to_stdout()
+    .read()
+    .map_err(selfci::MergeError::MergeFailed)?;
+    merge_log.push_str(&output);
+    merge_log.push('\n');
+
     // Move the base branch bookmark to the merge commit first
     merge_log.push_str(&format!(
         "Moving {} bookmark to merge commit\n",
@@ -1121,6 +1164,7 @@ fn merge_candidate(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
+    test_output: &str,
 ) -> Result<String, selfci::MergeError> {
     // Detect VCS first (needed to read config from base branch)
     let vcs = get_vcs(root_dir, None).map_err(|e| {
@@ -1176,13 +1220,13 @@ fn merge_candidate(
             merge_candidate_git_rebase(root_dir, base_branch, candidate)
         }
         (selfci::VCS::Git, selfci::config::MergeStyle::Merge) => {
-            merge_candidate_git_merge(root_dir, base_branch, candidate)
+            merge_candidate_git_merge(root_dir, base_branch, candidate, test_output)
         }
         (selfci::VCS::Jujutsu, selfci::config::MergeStyle::Rebase) => {
             merge_candidate_jj_rebase(root_dir, base_branch, candidate)
         }
         (selfci::VCS::Jujutsu, selfci::config::MergeStyle::Merge) => {
-            merge_candidate_jj_merge(root_dir, base_branch, candidate)
+            merge_candidate_jj_merge(root_dir, base_branch, candidate, test_output)
         }
     }
 }

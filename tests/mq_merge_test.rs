@@ -463,6 +463,13 @@ fn test_git_merge_merge() {
         .dir(repo_path)
         .run()
         .unwrap();
+
+    // Display full merge commit
+    eprintln!("\n=== git merge commit details ===");
+    cmd!("git", "--no-pager", "show", "main")
+        .dir(repo_path)
+        .run()
+        .unwrap();
 }
 
 #[test]
@@ -556,6 +563,13 @@ fn test_jj_merge_merge() {
     // Display commit log for visual inspection
     eprintln!("\n=== jj merge merge result ===");
     cmd!("jj", "--no-pager", "log", "-r", "ancestors(main, 5)")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Display full merge commit
+    eprintln!("\n=== jj merge commit details ===");
+    cmd!("jj", "--no-pager", "show", "main")
         .dir(repo_path)
         .run()
         .unwrap();
