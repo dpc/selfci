@@ -771,13 +771,13 @@ fn process_queue(
                         ) {
                             Ok(merge_log) => {
                                 // Append merge output with separator
-                                job_info.output.push_str("\n\n=== Merge Output ===\n");
+                                job_info.output.push_str("\n\n### Merge Output\n\n");
                                 job_info.output.push_str(&merge_log);
                             }
                             Err(e) => {
                                 job_info
                                     .output
-                                    .push_str(&format!("\n\n=== Merge Failed ===\n{}", e));
+                                    .push_str(&format!("\n\n### Merge Failed\n\n{}", e));
                                 job_info.status = mq_protocol::MQJobStatus::Failed;
                             }
                         }
@@ -926,7 +926,7 @@ fn merge_candidate_git_merge(
 
     // Build the merge commit message
     let merge_message = format!(
-        "Merge commit '{}' by SelfCI\n\n=== Check Output ===\n{}",
+        "Merge commit '{}' by SelfCI\n\n### Check Output\n\n{}",
         candidate.commit_id, test_output
     );
 
@@ -1103,7 +1103,7 @@ fn merge_candidate_jj_merge(
 
     // Set the merge commit description
     let merge_message = format!(
-        "Merge commit '{}' by SelfCI\n\n=== Check Output ===\n{}",
+        "Merge commit '{}' by SelfCI\n\n### Check Output\n\n{}",
         candidate.commit_id, test_output
     );
     merge_log.push_str("Setting merge commit description\n");
