@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
-    flakebox.url = "github:rustshop/flakebox?rev=9a22c690bc3c15291c3c70f662c855b5bdaffc0e";
+    flakebox.url = "github:rustshop/flakebox?rev=62af969ab344229d2a0d585a482293b3f186b221";
 
     bundlers = {
       url = "github:NixOS/bundlers";
