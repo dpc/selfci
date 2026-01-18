@@ -3,12 +3,14 @@ use nix::sys::signal::{self, Signal};
 use nix::sys::stat::{Mode, umask};
 use nix::unistd::{ForkResult, Pid, close, dup2, fork, setsid};
 use selfci::{MainError, WorkDirError, envs, get_vcs, mq_protocol, protocol};
+use signal_hook::consts::SIGTERM;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, Write};
 use std::os::unix::io::IntoRawFd;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::SystemTime;
 use tracing::debug;
@@ -451,6 +453,9 @@ fn run_daemon_loop(
     root_dir: PathBuf,
     base_branch: String,
 ) -> Result<(), MainError> {
+    // Create shutdown flag
+    let shutdown = Arc::new(AtomicBool::new(false));
+
     // Set up cleanup on exit - remove entire daemon directory
     let daemon_dir_cleanup = daemon_dir.clone();
     let _guard = scopeguard::guard((), move |_| {
@@ -460,6 +465,29 @@ fn run_daemon_loop(
     // Bind socket
     let socket_path = daemon_dir.join("mq.sock");
     let listener = UnixListener::bind(&socket_path).map_err(WorkDirError::CreateFailed)?;
+
+    // Set up signal handling using signal_hook's iterator API
+    // This is more robust than the low-level pipe API
+    use signal_hook::iterator::Signals;
+    let mut signals = Signals::new([SIGTERM]).map_err(|e| WorkDirError::CreateFailed(e.into()))?;
+
+    let shutdown_clone = Arc::clone(&shutdown);
+    let socket_path_clone = socket_path.clone();
+    std::thread::spawn(move || {
+        debug!("Signal handler thread started, waiting for SIGTERM");
+
+        // Block until SIGTERM is received (the only signal we registered for)
+        if let Some(sig) = signals.forever().next() {
+            debug_assert_eq!(sig, SIGTERM);
+            debug!("SIGTERM received, waking up listener");
+            // Set flag and wake up the blocking accept()
+            shutdown_clone.store(true, Ordering::SeqCst);
+            let _ = UnixStream::connect(&socket_path_clone);
+            debug!("Connected to socket to wake up accept()");
+        }
+
+        debug!("Signal handler thread exiting");
+    });
 
     // Initialize state
     let state = Arc::new(Mutex::new(MQState {
@@ -482,10 +510,20 @@ fn run_daemon_loop(
         process_queue(state_clone, root_dir_clone, mq_jobs_receiver);
     });
 
+    debug!("Entering main daemon loop");
+
     // Main loop: accept connections and handle requests
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
+    loop {
+        let accepted = listener.accept();
+
+        // Check for shutdown after accept returns (could be woken by signal handler)
+        if shutdown.load(Ordering::SeqCst) {
+            debug!("Shutdown requested, exiting daemon loop");
+            break;
+        }
+
+        match accepted {
+            Ok((mut stream, _)) => {
                 let state_clone = Arc::clone(&state);
                 let mq_jobs_sender_clone = mq_jobs_sender.clone();
                 std::thread::spawn(move || {
@@ -1379,14 +1417,22 @@ pub fn stop_daemon() -> Result<(), MainError> {
     }
 
     // Wait for process to exit (with timeout)
+    // We check if the daemon directory was cleaned up by the daemon's scopeguard,
+    // which is more reliable than signal::kill(pid, None) which returns success
+    // for zombie processes.
     let timeout = std::time::Duration::from_secs(30);
     let start = std::time::Instant::now();
 
     loop {
-        // Check if process still exists
-        let exists = signal::kill(Pid::from_raw(pid as i32), None).is_ok();
+        // Check if daemon directory was cleaned up (daemon exited and ran scopeguard)
+        if !daemon_dir.exists() {
+            println!("Daemon stopped successfully");
+            return Ok(());
+        }
 
-        if !exists {
+        // Also check if process still exists (not a zombie)
+        // If process doesn't exist at all, clean up the directory
+        if signal::kill(Pid::from_raw(pid as i32), None).is_err() {
             println!("Daemon stopped successfully");
             std::fs::remove_dir_all(&daemon_dir).ok();
             return Ok(());

@@ -4,8 +4,9 @@ use selfci::{
 };
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use tracing::{debug, info};
@@ -131,12 +132,16 @@ pub fn run_candidate_check(
         });
     }
 
+    // Create shutdown flag for control socket listener
+    let listener_shutdown = Arc::new(AtomicBool::new(false));
+
     // Spawn control socket listener thread
     let job_steps_clone = Arc::clone(&job_steps);
     let used_job_names_clone = Arc::clone(&used_job_names);
     let job_completions_clone = Arc::clone(&job_completions);
     let jobs_sender_clone = jobs_sender.clone();
     let messages_sender_clone = messages_sender.clone();
+    let listener_shutdown_clone = Arc::clone(&listener_shutdown);
     let spawn_context = super::worker::JobSpawnContext {
         base_dir: base_workdir.path().to_path_buf(),
         candidate_dir: candidate_workdir.path().to_path_buf(),
@@ -154,6 +159,7 @@ pub fn run_candidate_check(
             jobs_sender_clone,
             messages_sender_clone,
             spawn_context,
+            listener_shutdown_clone,
         );
     });
 
@@ -390,6 +396,10 @@ pub fn run_candidate_check(
             }
         }
     }
+
+    // Signal control socket listener to shut down and wake it up
+    listener_shutdown.store(true, Ordering::SeqCst);
+    let _ = UnixStream::connect(&socket_path); // Wake up blocking accept()
 
     // Drop the jobs sender to close the channel and let workers exit
     drop(jobs_sender);

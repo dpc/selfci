@@ -566,6 +566,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "signal-hook",
  "tempfile",
  "tracing",
  "tracing-subscriber",

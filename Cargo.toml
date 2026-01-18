@@ -33,6 +33,7 @@ humantime = "2.1"
 daemonize = "0.5"
 nix = { version = "0.29", features = ["signal", "process", "fs", "user"] }
 dirs = "5.0"
+signal-hook = "0.3"
 
 [profile]
 

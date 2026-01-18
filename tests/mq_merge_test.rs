@@ -458,10 +458,11 @@ fn test_jj_rebase_merge() {
 
     let feature_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
 
-    cmd!(selfci_bin(), "mq", "start", "-f")
+    // Start MQ daemon in background (like git tests)
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
         .env("SELFCI_LOG", "debug")
-        .start()
+        .run()
         .unwrap();
     wait_for_daemon_start();
 
@@ -498,10 +499,11 @@ fn test_jj_merge_merge() {
 
     let feature_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
 
-    cmd!(selfci_bin(), "mq", "start", "-f")
+    // Start MQ daemon in background (like git tests)
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
         .env("SELFCI_LOG", "debug")
-        .start()
+        .run()
         .unwrap();
     wait_for_daemon_start();
 
@@ -529,4 +531,196 @@ fn test_jj_merge_merge() {
 
     verify_working_dir_unchanged_jj(repo_path);
     verify_merge_succeeded_jj(repo_path, "merge");
+}
+
+/// Test that stopping the MQ daemon via command works correctly
+#[test]
+fn test_mq_stop_via_command() {
+    let repo = setup_git_mq_repo("rebase");
+    let repo_path = repo.path();
+
+    // Start daemon in background
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_start();
+
+    // Stop via command
+    let start = std::time::Instant::now();
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    // Should stop quickly (under 5 seconds)
+    assert!(
+        elapsed.as_secs() < 5,
+        "Daemon stop via command took too long: {:?}",
+        elapsed
+    );
+}
+
+/// Test that stopping the MQ daemon via SIGTERM signal works correctly
+#[test]
+fn test_mq_stop_via_signal() {
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+
+    let repo = setup_git_mq_repo("rebase");
+    let repo_path = repo.path();
+
+    // Start daemon in background
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_start();
+
+    // Find the daemon PID from the runtime directory
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .map(|d| std::path::PathBuf::from(d).join("selfci"))
+        .unwrap_or_else(|_| {
+            let uid = nix::unistd::getuid();
+            std::path::PathBuf::from(format!("/tmp/selfci-{}/selfci", uid))
+        });
+
+    // Find the daemon dir for this repo by checking mq.dir contents
+    let canonical_repo = repo_path.canonicalize().unwrap();
+    let mut daemon_pid: Option<i32> = None;
+
+    for entry in std::fs::read_dir(&runtime_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let dir_path = entry.path();
+        let mq_dir_file = dir_path.join("mq.dir");
+        if let Ok(contents) = std::fs::read_to_string(&mq_dir_file) {
+            if contents.trim() == canonical_repo.to_string_lossy() {
+                let pid_file = dir_path.join("mq.pid");
+                if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+                    daemon_pid = pid_str.trim().parse().ok();
+                    break;
+                }
+            }
+        }
+    }
+
+    let pid = daemon_pid.expect("Could not find daemon PID for this repo");
+
+    // Send SIGTERM directly
+    let start = std::time::Instant::now();
+    signal::kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
+
+    // Wait for process to exit
+    for _ in 0..50 {
+        if signal::kill(Pid::from_raw(pid), None).is_err() {
+            break; // Process exited
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let elapsed = start.elapsed();
+
+    // Should stop quickly (under 5 seconds)
+    assert!(
+        elapsed.as_secs() < 5,
+        "Daemon stop via SIGTERM took too long: {:?}",
+        elapsed
+    );
+
+    // Verify process is gone
+    assert!(
+        signal::kill(Pid::from_raw(pid), None).is_err(),
+        "Daemon process should have exited"
+    );
+}
+
+/// Test that stopping the MQ daemon in foreground mode via command works correctly
+#[test]
+fn test_mq_stop_foreground_via_command() {
+    let repo = setup_git_mq_repo("rebase");
+    let repo_path = repo.path();
+
+    // Start daemon in foreground mode (runs as direct child process)
+    // Use stdin/stdout/stderr_null to avoid blocking on IO
+    let _handle = cmd!(selfci_bin(), "mq", "start", "-f")
+        .dir(repo_path)
+        .stdin_null()
+        .stdout_null()
+        .stderr_null()
+        .start()
+        .unwrap();
+    wait_for_daemon_start();
+
+    // Stop via command
+    let start = std::time::Instant::now();
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    // Should stop quickly (under 5 seconds)
+    assert!(
+        elapsed.as_secs() < 5,
+        "Foreground daemon stop via command took too long: {:?}",
+        elapsed
+    );
+}
+
+/// Test that stopping the MQ daemon in foreground mode via SIGTERM signal works correctly
+#[test]
+fn test_mq_stop_foreground_via_signal() {
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+    use std::process::{Command, Stdio};
+
+    let repo = setup_git_mq_repo("rebase");
+    let repo_path = repo.path();
+
+    // Start daemon in foreground mode using std::process::Command
+    // Use null IO to avoid any blocking on pipe buffers
+    let child = Command::new(selfci_bin())
+        .args(["mq", "start", "-f"])
+        .current_dir(repo_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Failed to spawn daemon");
+    let pid = child.id() as i32;
+    wait_for_daemon_start();
+
+    // Send SIGTERM directly
+    let start = std::time::Instant::now();
+    signal::kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
+
+    // Wait for process to exit using try_wait() to properly reap zombies
+    // Note: signal::kill(pid, None) returns success for zombie processes,
+    // so we must use try_wait() which will reap the zombie
+    let mut child = child;
+    let mut exited = false;
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                exited = true;
+                break;
+            }
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => break,
+        }
+    }
+    let elapsed = start.elapsed();
+
+    // Should stop quickly (under 5 seconds)
+    assert!(
+        exited && elapsed.as_secs() < 5,
+        "Foreground daemon stop via SIGTERM took too long: {:?} (exited: {})",
+        elapsed,
+        exited
+    );
 }

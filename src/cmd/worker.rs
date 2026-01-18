@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -175,6 +176,8 @@ pub struct JobSpawnContext {
 }
 
 /// Control socket listener - handles step logging and job control
+/// The shutdown flag is checked after each accept(). To wake up a blocking accept(),
+/// the caller should connect to the socket after setting the shutdown flag.
 pub fn control_socket_listener(
     listener: UnixListener,
     job_steps: Arc<Mutex<HashMap<String, Vec<protocol::StepLogEntry>>>>,
@@ -183,10 +186,16 @@ pub fn control_socket_listener(
     jobs_sender: mpsc::Sender<RunJobRequest>,
     messages_sender: mpsc::Sender<JobMessage>,
     spawn_context: JobSpawnContext,
+    shutdown: Arc<AtomicBool>,
 ) {
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // Check for shutdown before processing
+                if shutdown.load(Ordering::SeqCst) {
+                    debug!("Control socket listener shutting down");
+                    break;
+                }
                 let job_steps_clone = Arc::clone(&job_steps);
                 let used_job_names_clone = Arc::clone(&used_job_names);
                 let job_completions_clone = Arc::clone(&job_completions);
@@ -368,6 +377,11 @@ pub fn control_socket_listener(
                 });
             }
             Err(e) => {
+                // Check for shutdown on error
+                if shutdown.load(Ordering::SeqCst) {
+                    debug!("Control socket listener shutting down");
+                    break;
+                }
                 debug!("Control socket accept error: {}", e);
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }

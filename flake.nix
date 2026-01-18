@@ -100,7 +100,10 @@
 
                 tests = craneLib.cargoNextest {
                   cargoArtifacts = workspace;
-                    nativeBuildInputs = with pkgs; [ git jujutsu ];
+                  nativeBuildInputs = with pkgs; [
+                    git
+                    jujutsu
+                  ];
                 };
 
                 clippy = craneLib.cargoClippy {
