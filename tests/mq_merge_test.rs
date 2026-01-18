@@ -407,6 +407,13 @@ fn test_git_rebase_merge() {
 
     // Verify merge succeeded
     verify_merge_succeeded_git(repo_path, "rebase");
+
+    // Display commit log for visual inspection
+    eprintln!("\n=== git rebase merge result ===");
+    cmd!("git", "--no-pager", "log", "--oneline", "--graph", "main")
+        .dir(repo_path)
+        .run()
+        .unwrap();
 }
 
 #[test]
@@ -449,6 +456,13 @@ fn test_git_merge_merge() {
 
     verify_working_dir_unchanged_git(repo_path);
     verify_merge_succeeded_git(repo_path, "merge");
+
+    // Display commit log for visual inspection
+    eprintln!("\n=== git merge merge result ===");
+    cmd!("git", "--no-pager", "log", "--oneline", "--graph", "main")
+        .dir(repo_path)
+        .run()
+        .unwrap();
 }
 
 #[test]
@@ -490,6 +504,13 @@ fn test_jj_rebase_merge() {
 
     verify_working_dir_unchanged_jj(repo_path);
     verify_merge_succeeded_jj(repo_path, "rebase");
+
+    // Display commit log for visual inspection
+    eprintln!("\n=== jj rebase merge result ===");
+    cmd!("jj", "--no-pager", "log", "-r", "ancestors(main, 5)")
+        .dir(repo_path)
+        .run()
+        .unwrap();
 }
 
 #[test]
@@ -531,6 +552,13 @@ fn test_jj_merge_merge() {
 
     verify_working_dir_unchanged_jj(repo_path);
     verify_merge_succeeded_jj(repo_path, "merge");
+
+    // Display commit log for visual inspection
+    eprintln!("\n=== jj merge merge result ===");
+    cmd!("jj", "--no-pager", "log", "-r", "ancestors(main, 5)")
+        .dir(repo_path)
+        .run()
+        .unwrap();
 }
 
 /// Test that stopping the MQ daemon via command works correctly
