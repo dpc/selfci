@@ -1,5 +1,7 @@
 job:
   clone-mode: partial
+  # Note: $SELFCI_BASE_DIR not used, which means entire CI check
+  # come from the candidate itself.
   command: ./.config/selfci/ci.sh
 
 mq:
