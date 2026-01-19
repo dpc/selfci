@@ -194,6 +194,7 @@ pub struct JobSpawnContext {
 /// Control socket listener - handles step logging and job control
 /// The shutdown flag is checked after each accept(). To wake up a blocking accept(),
 /// the caller should connect to the socket after setting the shutdown flag.
+#[allow(clippy::too_many_arguments)]
 pub fn control_socket_listener(
     listener: UnixListener,
     job_steps: Arc<Mutex<HashMap<String, Vec<protocol::StepLogEntry>>>>,
@@ -320,18 +321,16 @@ pub fn control_socket_listener(
                                     let mut steps = job_steps_clone.lock().unwrap();
                                     let job_steps_vec = steps.entry(job_name.clone()).or_default();
 
-                                    if let Some(prev_step) = job_steps_vec.last_mut() {
-                                        if matches!(prev_step.status, protocol::StepStatus::Running)
-                                        {
-                                            prev_step.status = protocol::StepStatus::Success;
-                                            let _ = messages_sender_clone.send(
-                                                JobMessage::StepCompleted {
-                                                    job_name: job_name.clone(),
-                                                    step_name: prev_step.name.clone(),
-                                                    status: protocol::StepStatus::Success,
-                                                },
-                                            );
-                                        }
+                                    if let Some(prev_step) = job_steps_vec.last_mut()
+                                        && matches!(prev_step.status, protocol::StepStatus::Running)
+                                    {
+                                        prev_step.status = protocol::StepStatus::Success;
+                                        let _ =
+                                            messages_sender_clone.send(JobMessage::StepCompleted {
+                                                job_name: job_name.clone(),
+                                                step_name: prev_step.name.clone(),
+                                                status: protocol::StepStatus::Success,
+                                            });
                                     }
 
                                     let entry = protocol::StepLogEntry {

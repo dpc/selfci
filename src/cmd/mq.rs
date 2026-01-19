@@ -1012,12 +1012,12 @@ fn process_queue(
         ) {
             Ok(result) => {
                 // Handle post-clone hook output if present
-                if let Some(output) = &result.post_clone_output {
-                    if !output.is_empty() {
-                        job_info.output.push_str("### Post-Clone Hook\n\n");
-                        job_info.output.push_str(output);
-                        job_info.output.push('\n');
-                    }
+                if let Some(output) = &result.post_clone_output
+                    && !output.is_empty()
+                {
+                    job_info.output.push_str("### Post-Clone Hook\n\n");
+                    job_info.output.push_str(output);
+                    job_info.output.push('\n');
                 }
 
                 // Check if post-clone hook failed
