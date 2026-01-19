@@ -67,7 +67,7 @@ Here is an example of how SelfCI works:
 
 ```
 > selfci check
-Starting check candidate=@ commit="b281094a"
+Starting check candidate=@ candidate-commit="387e34b7" base=@
 [0/1] 🚀 started: main
 [0/2] 🚀 started: lint
 [0/3] 🚀 started: cargo
@@ -111,7 +111,6 @@ Output:
 [1/3] ✅ passed: lint (0.423s)
 --- output: lint ---
 💡 Run 'just' for a list of available 'just ...' helper recipes
-environment: line 2: warning: command substitution: ignored null byte in input
 --- end output ---
 [1/3] ✅ passed: cargo / nextest (0.108s)
 [2/3] ✅ passed: cargo (0.446s)

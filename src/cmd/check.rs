@@ -563,7 +563,8 @@ pub fn check(
     // Log the start of the check with candidate info
     info!(
         candidate = %resolved_candidate.user,
-        commit = &resolved_candidate.commit_id.as_str()[..8],
+        "candidate-commit" = &resolved_candidate.commit_id.as_str()[..8],
+        base = %resolved_base.user,
         "Starting check"
     );
     // Determine parallelism level
