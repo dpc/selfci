@@ -82,6 +82,7 @@ fn run_post_clone_hook(
 
     let result = cmd(&full_command[0], &full_command[1..])
         .dir(root_dir)
+        .env(envs::SELFCI_VERSION, env!("CARGO_PKG_VERSION"))
         .env(envs::SELFCI_BASE_DIR, base_dir)
         .env(envs::SELFCI_CANDIDATE_DIR, candidate_dir)
         .env(

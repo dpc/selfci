@@ -110,6 +110,7 @@ pub fn job_worker(
         // Execute the job command
         let handle = match cmd(&job.job_full_command[0], &job.job_full_command[1..])
             .dir(&job.candidate_dir)
+            .env(envs::SELFCI_VERSION, env!("CARGO_PKG_VERSION"))
             .env(envs::SELFCI_BASE_DIR, &job.base_dir)
             .env(envs::SELFCI_CANDIDATE_DIR, &job.candidate_dir)
             .env(envs::SELFCI_CANDIDATE_COMMIT_ID, &job.candidate_commit_id)
