@@ -36,34 +36,25 @@ job:
 #   # Local hooks override hooks defined here.
 #
 #   # Runs before daemonization with inherited stdio (allows interactive input)
-#   # Use for: password prompts, keychain unlock, interactive authentication
-#   # If this hook fails, daemon startup is aborted
 #   # pre-start:
 #   #   command: 'echo "Pre-start (interactive)"'
 #
 #   # Runs after daemonization with captured output (non-interactive)
-#   # Use for: notifications, non-interactive setup
-#   # If this hook fails, daemon startup is aborted
 #   # post-start:
 #   #   command: 'echo "Post-start (captured)"'
 #
 #   # Runs before worktrees are created for each candidate
-#   # If this hook fails, the job fails with status "Failed: pre-clone"
 #   # pre-clone:
 #   #   command: 'echo "Running pre-clone"'
 #
 #   # Runs after worktrees are created, before the job command
-#   # Has access to SELFCI_BASE_DIR and SELFCI_CANDIDATE_DIR
-#   # If this hook fails, the job fails with status "Failed: post-clone"
 #   # post-clone:
 #   #   command: 'echo "Running post-clone"'
 #
 #   # Runs after check passes, before merging
-#   # If this hook fails, the merge is skipped and job fails with "Failed: pre-merge"
 #   # pre-merge:
 #   #   command: 'echo "Running pre-merge"'
 #
 #   # Runs after a successful merge
-#   # Hook failure is logged but does not change job status (already merged)
 #   # post-merge:
 #   #   command: 'echo "Merge completed"'
