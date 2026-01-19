@@ -1,6 +1,7 @@
+use duct::cmd;
 use selfci::{
-    CheckError, MainError, WorkDirError, copy_revisions_to_workdirs, get_vcs, protocol,
-    read_config, revision::ResolvedRevision,
+    CheckError, MainError, WorkDirError, config::CommandConfig, copy_revisions_to_workdirs,
+    get_vcs, protocol, read_config, revision::ResolvedRevision,
 };
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -33,6 +34,24 @@ pub struct CheckResult {
     pub steps: Vec<protocol::StepLogEntry>,
     pub exit_code: Option<i32>,
     pub duration: Duration,
+    /// Post-clone hook output (if hook was run)
+    pub post_clone_output: Option<String>,
+    /// Whether post-clone hook succeeded (None if no hook was run)
+    pub post_clone_success: Option<bool>,
+}
+
+/// Configuration for running a post-clone hook
+pub struct PostCloneHookConfig<'a> {
+    /// The hook command configuration
+    pub hook: &'a CommandConfig,
+    /// Candidate commit ID
+    pub candidate_commit_id: &'a str,
+    /// Candidate change ID
+    pub candidate_change_id: &'a str,
+    /// Candidate ID (user-provided revision string)
+    pub candidate_id: &'a str,
+    /// Base branch name
+    pub base_branch: &'a str,
 }
 
 impl CheckMode {
@@ -44,10 +63,59 @@ impl CheckMode {
     }
 }
 
+/// Run the post-clone hook with environment variables set
+/// Returns (output, success)
+fn run_post_clone_hook(
+    hook_config: &PostCloneHookConfig<'_>,
+    root_dir: &Path,
+    base_dir: &Path,
+    candidate_dir: &Path,
+) -> (String, bool) {
+    use selfci::envs;
+
+    if !hook_config.hook.is_set() {
+        return (String::new(), true);
+    }
+
+    let full_command = hook_config.hook.full_command();
+    debug!(command = ?full_command, "Running post-clone hook");
+
+    let result = cmd(&full_command[0], &full_command[1..])
+        .dir(root_dir)
+        .env(envs::SELFCI_BASE_DIR, base_dir)
+        .env(envs::SELFCI_CANDIDATE_DIR, candidate_dir)
+        .env(
+            envs::SELFCI_CANDIDATE_COMMIT_ID,
+            hook_config.candidate_commit_id,
+        )
+        .env(
+            envs::SELFCI_CANDIDATE_CHANGE_ID,
+            hook_config.candidate_change_id,
+        )
+        .env(envs::SELFCI_CANDIDATE_ID, hook_config.candidate_id)
+        .env(envs::SELFCI_MQ_BASE_BRANCH, hook_config.base_branch)
+        .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
+        .run();
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let success = output.status.success();
+            (stdout, success)
+        }
+        Err(e) => (format!("Hook execution error: {}", e), false),
+    }
+}
+
 /// Run a candidate check - shared implementation for both inline checks and merge queue
 ///
 /// A "candidate check" runs the configured CI command against a candidate revision,
 /// starting with the "main" job and potentially spawning additional jobs for parallelism.
+///
+/// If `post_clone_hook` is provided, it will be run after worktrees are created but before
+/// the job starts. The hook receives environment variables for the worktree paths.
 pub fn run_candidate_check(
     root_dir: &Path,
     base_rev: &ResolvedRevision,
@@ -55,6 +123,7 @@ pub fn run_candidate_check(
     parallelism: usize,
     forced_vcs: Option<&str>,
     mode: CheckMode,
+    post_clone_hook: Option<PostCloneHookConfig<'_>>,
 ) -> Result<CheckResult, MainError> {
     // Get VCS (forced or auto-detected)
     let vcs = get_vcs(root_dir, forced_vcs)?;
@@ -93,6 +162,32 @@ pub fn run_candidate_check(
         &candidate_rev.commit_id,
         root_config.job.clone_mode,
     )?;
+
+    // Run post-clone hook if configured
+    let (post_clone_output, post_clone_success) = if let Some(hook_config) = &post_clone_hook {
+        debug!("Running post-clone hook");
+        let result = run_post_clone_hook(
+            hook_config,
+            root_dir,
+            base_workdir.path(),
+            candidate_workdir.path(),
+        );
+        (Some(result.0), Some(result.1))
+    } else {
+        (None, None)
+    };
+
+    // If post-clone hook failed, return early with the hook output
+    if post_clone_success == Some(false) {
+        return Ok(CheckResult {
+            output: String::new(),
+            steps: Vec::new(),
+            exit_code: Some(1),
+            duration: Duration::ZERO,
+            post_clone_output,
+            post_clone_success,
+        });
+    }
 
     // Read config from base workdir to get the actual CI command
     let config = read_config(base_workdir.path())?;
@@ -149,6 +244,9 @@ pub fn run_candidate_check(
         command: config.job.command.clone(),
         print_output: mode.print_output(),
         socket_path: socket_path.clone(),
+        candidate_commit_id: candidate_rev.commit_id.to_string(),
+        candidate_change_id: candidate_rev.change_id.to_string(),
+        candidate_id: candidate_rev.user.to_string(),
     };
     std::thread::spawn(move || {
         super::worker::control_socket_listener(
@@ -179,6 +277,9 @@ pub fn run_candidate_check(
             job_full_command: full_command,
             print_output: mode.print_output(),
             socket_path: socket_path.clone(),
+            candidate_commit_id: candidate_rev.commit_id.to_string(),
+            candidate_change_id: candidate_rev.change_id.to_string(),
+            candidate_id: candidate_rev.user.to_string(),
         };
 
         jobs_sender.send(job).map_err(|_| CheckError::CheckFailed)?;
@@ -415,6 +516,8 @@ pub fn run_candidate_check(
         steps: all_steps,
         exit_code: if any_job_failed { Some(1) } else { Some(0) },
         duration: total_duration,
+        post_clone_output,
+        post_clone_success,
     })
 }
 
@@ -473,6 +576,7 @@ pub fn check(
     debug!("Running jobs with parallelism {}", parallelism);
 
     // Run the candidate check using shared implementation
+    // Note: post-clone hooks are only for MQ, not inline checks
     let result = run_candidate_check(
         &root_dir,
         &resolved_base,
@@ -480,6 +584,7 @@ pub fn check(
         parallelism,
         forced_vcs,
         CheckMode::Inline { print_output },
+        None, // No post-clone hook for inline checks
     )?;
 
     // Print total time

@@ -11,19 +11,21 @@ fn test_init_config() {
     let result = init_config(root_path);
     assert!(result.is_ok(), "init_config failed: {:?}", result);
 
-    // Verify config file was created
-    let mut config_path = root_path.to_path_buf();
+    // Build config directory path
+    let mut config_dir = root_path.to_path_buf();
     for segment in constants::CONFIG_DIR_PATH {
-        config_path.push(segment);
+        config_dir.push(segment);
     }
-    config_path.push(constants::CONFIG_FILENAME);
+
+    // Verify ci.yaml was created
+    let config_path = config_dir.join(constants::CONFIG_FILENAME);
     assert!(
         config_path.exists(),
         "{} should exist",
         constants::CONFIG_FILENAME
     );
 
-    // Verify config file contains the template
+    // Verify ci.yaml contains the template
     let content = fs::read_to_string(&config_path).expect("Failed to read config");
     assert!(
         content.contains("command:"),
@@ -32,6 +34,46 @@ fn test_init_config() {
     assert!(
         content.contains("SelfCI Configuration"),
         "Config should contain header comment"
+    );
+
+    // Verify local.yaml was created
+    let local_config_path = config_dir.join(constants::LOCAL_CONFIG_FILENAME);
+    assert!(
+        local_config_path.exists(),
+        "{} should exist",
+        constants::LOCAL_CONFIG_FILENAME
+    );
+
+    // Verify local.yaml contains the template
+    let local_content =
+        fs::read_to_string(&local_config_path).expect("Failed to read local config");
+    assert!(
+        local_content.contains("SelfCI Local Configuration"),
+        "Local config should contain header comment"
+    );
+    assert!(
+        local_content.contains("pre-start:"),
+        "Local config should contain pre-start hook example"
+    );
+    assert!(
+        local_content.contains("post-start:"),
+        "Local config should contain post-start hook example"
+    );
+    assert!(
+        local_content.contains("pre-clone:"),
+        "Local config should contain pre-clone hook example"
+    );
+    assert!(
+        local_content.contains("post-clone:"),
+        "Local config should contain post-clone hook example"
+    );
+    assert!(
+        local_content.contains("pre-merge:"),
+        "Local config should contain pre-merge hook example"
+    );
+    assert!(
+        local_content.contains("post-merge:"),
+        "Local config should contain post-merge hook example"
     );
 
     // Verify we can parse the config
@@ -51,25 +93,43 @@ fn test_init_config_preserves_existing() {
     }
     fs::create_dir_all(&config_dir).expect("Failed to create config dir");
 
-    // Write custom content to the config
+    // Write custom content to ci.yaml
     let config_path = config_dir.join(constants::CONFIG_FILENAME);
     let custom_content = "# Custom config\njob:\n  command: my custom command\n";
     fs::write(&config_path, custom_content).expect("Failed to write custom config");
+
+    // Write custom content to local.yaml
+    let local_config_path = config_dir.join(constants::LOCAL_CONFIG_FILENAME);
+    let custom_local_content = "# Custom local config\nmq:\n  pre-start:\n    command: my hook\n";
+    fs::write(&local_config_path, custom_local_content)
+        .expect("Failed to write custom local config");
 
     // Call init_config again
     let result = init_config(root_path);
     assert!(result.is_ok(), "Second init_config failed: {:?}", result);
 
-    // Verify the custom content is preserved (not overwritten)
+    // Verify ci.yaml custom content is preserved (not overwritten)
     let preserved_content =
         fs::read_to_string(&config_path).expect("Failed to read config after second init");
     assert_eq!(
         preserved_content, custom_content,
-        "Config should not be overwritten"
+        "ci.yaml should not be overwritten"
     );
     assert!(
         preserved_content.contains("my custom command"),
         "Custom command should be preserved"
+    );
+
+    // Verify local.yaml custom content is preserved (not overwritten)
+    let preserved_local_content = fs::read_to_string(&local_config_path)
+        .expect("Failed to read local config after second init");
+    assert_eq!(
+        preserved_local_content, custom_local_content,
+        "local.yaml should not be overwritten"
+    );
+    assert!(
+        preserved_local_content.contains("my hook"),
+        "Custom hook should be preserved"
     );
 }
 

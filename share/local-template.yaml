@@ -1,0 +1,44 @@
+# SelfCI Local Configuration
+#
+# This file contains local overrides that are NOT checked into source control.
+# Add .config/selfci/local.yaml to your .gitignore file.
+#
+# Values here override the corresponding values in ci.yaml.
+
+# MQ hooks configuration (optional)
+# These hooks run at different stages of the merge queue process.
+# mq:
+#   # Runs BEFORE daemonization with inherited stdio (allows interactive input)
+#   # Use for: password prompts, keychain unlock, interactive authentication
+#   # Output is displayed directly to the terminal, stdin is available
+#   pre-start:
+#     command: 'echo "Pre-start hook (interactive)"'
+#     # command-prefix: ["bash", "-c"]
+#
+#   # Runs AFTER daemonization with captured output (non-interactive)
+#   # Use for: notifications, non-interactive setup, logging
+#   # Output is captured and logged, no stdin available
+#   post-start:
+#     command: 'echo "Post-start hook (captured)"'
+#
+#   # Runs before worktrees are created for each candidate
+#   # Use for: pre-flight checks, rate limiting, external validations
+#   pre-clone:
+#     command: 'echo "Running pre-clone"'
+#
+#   # Runs after worktrees are created, before the job command
+#   # Has access to SELFCI_BASE_DIR and SELFCI_CANDIDATE_DIR
+#   # Use for: code analysis, additional validation on the actual code
+#   post-clone:
+#     command: 'echo "Running post-clone"'
+#
+#   # Runs after check passes, before merging
+#   # Use for: final validations, approvals, etc.
+#   # If this hook fails, the merge is skipped.
+#   pre-merge:
+#     command: 'echo "Running pre-merge"'
+#
+#   # Runs after a successful merge
+#   # Use for: notifications, deployments, etc.
+#   post-merge:
+#     command: 'echo "Merge completed"'

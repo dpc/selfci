@@ -18,6 +18,18 @@ pub const SELFCI_BASE_DIR: &str = "SELFCI_BASE_DIR";
 /// Candidate directory path (set by selfci when running checks)
 pub const SELFCI_CANDIDATE_DIR: &str = "SELFCI_CANDIDATE_DIR";
 
+/// Candidate commit ID (the git/jj commit hash)
+pub const SELFCI_CANDIDATE_COMMIT_ID: &str = "SELFCI_CANDIDATE_COMMIT_ID";
+
+/// Candidate change ID (jj change ID, may be empty for git)
+pub const SELFCI_CANDIDATE_CHANGE_ID: &str = "SELFCI_CANDIDATE_CHANGE_ID";
+
+/// Candidate ID (the user-provided identifier, e.g., branch name or commit reference)
+pub const SELFCI_CANDIDATE_ID: &str = "SELFCI_CANDIDATE_ID";
+
+/// MQ base branch name
+pub const SELFCI_MQ_BASE_BRANCH: &str = "SELFCI_MQ_BASE_BRANCH";
+
 /// Force a specific VCS (git or jujutsu)
 pub const SELFCI_VCS_FORCE: &str = "SELFCI_VCS_FORCE";
 

@@ -756,3 +756,132 @@ job:
         "Should NOT see lax config output (would indicate config read from candidate - SECURITY ISSUE!)"
     );
 }
+
+/// Test that candidate environment variables are passed to jobs
+#[test]
+fn test_candidate_env_vars_passed_to_jobs() {
+    let repo = common::setup_git_repo();
+    let repo_path = repo.path();
+
+    // Reset to base commit
+    cmd!("git", "reset", "--hard", "HEAD^")
+        .dir(repo_path)
+        .run()
+        .expect("Failed to reset to base");
+
+    // Create a config that outputs all the candidate env vars
+    let config_content = r#"
+job:
+  command: |
+    echo "COMMIT_ID=$SELFCI_CANDIDATE_COMMIT_ID"
+    echo "CHANGE_ID=$SELFCI_CANDIDATE_CHANGE_ID"
+    echo "CANDIDATE_ID=$SELFCI_CANDIDATE_ID"
+    echo "BASE_DIR=$SELFCI_BASE_DIR"
+    echo "CANDIDATE_DIR=$SELFCI_CANDIDATE_DIR"
+    echo "JOB_NAME=$SELFCI_JOB_NAME"
+"#;
+
+    fs::write(config_path(repo_path), config_content).expect("Failed to write config");
+
+    // Commit the new config as the base
+    cmd!("git", "add", &config_path_str())
+        .dir(repo_path)
+        .run()
+        .expect("Failed to git add config");
+
+    cmd!("git", "commit", "--amend", "--no-edit")
+        .dir(repo_path)
+        .run()
+        .expect("Failed to amend base commit");
+
+    // Create candidate commit
+    fs::write(repo_path.join("candidate.txt"), "candidate content")
+        .expect("Failed to write candidate file");
+
+    cmd!("git", "add", "candidate.txt")
+        .dir(repo_path)
+        .run()
+        .expect("Failed to git add candidate");
+
+    cmd!("git", "commit", "-m", "Candidate commit")
+        .dir(repo_path)
+        .run()
+        .expect("Failed to commit candidate");
+
+    // Get the expected commit ID
+    let expected_commit_id = cmd!("git", "rev-parse", "HEAD")
+        .dir(repo_path)
+        .read()
+        .expect("Failed to get commit hash")
+        .trim()
+        .to_string();
+
+    // Run selfci check
+    let selfci_bin = env!("CARGO_BIN_EXE_selfci");
+    let output = cmd!(
+        selfci_bin,
+        "check",
+        "--root",
+        repo_path,
+        "--base",
+        "HEAD^",
+        "--candidate",
+        "HEAD",
+        "--print-output"
+    )
+    .env("SELFCI_VCS_FORCE", "git")
+    .stderr_to_stdout()
+    .unchecked()
+    .read()
+    .expect("Failed to run selfci check");
+
+    println!("Output:\n{}", output);
+
+    // Verify the candidate commit ID is passed correctly
+    let commit_id_line = output
+        .lines()
+        .find(|line| line.starts_with("COMMIT_ID="))
+        .expect("Should have COMMIT_ID line");
+    assert!(
+        commit_id_line.contains(&expected_commit_id),
+        "SELFCI_CANDIDATE_COMMIT_ID should match the candidate commit hash. Got: {}, Expected: {}",
+        commit_id_line,
+        expected_commit_id
+    );
+
+    // Verify CANDIDATE_ID is passed (should be "HEAD" as that's what we passed)
+    let candidate_id_line = output
+        .lines()
+        .find(|line| line.starts_with("CANDIDATE_ID="))
+        .expect("Should have CANDIDATE_ID line");
+    assert!(
+        candidate_id_line.contains("HEAD"),
+        "SELFCI_CANDIDATE_ID should be 'HEAD' (the user-provided revision). Got: {}",
+        candidate_id_line
+    );
+
+    // Verify BASE_DIR and CANDIDATE_DIR are set (non-empty)
+    let base_dir_line = output
+        .lines()
+        .find(|line| line.starts_with("BASE_DIR="))
+        .expect("Should have BASE_DIR line");
+    assert!(
+        base_dir_line.len() > "BASE_DIR=".len(),
+        "SELFCI_BASE_DIR should be set"
+    );
+
+    let candidate_dir_line = output
+        .lines()
+        .find(|line| line.starts_with("CANDIDATE_DIR="))
+        .expect("Should have CANDIDATE_DIR line");
+    assert!(
+        candidate_dir_line.len() > "CANDIDATE_DIR=".len(),
+        "SELFCI_CANDIDATE_DIR should be set"
+    );
+
+    // Verify JOB_NAME is set
+    assert!(
+        output.contains("JOB_NAME=main"),
+        "SELFCI_JOB_NAME should be 'main'"
+    );
+}

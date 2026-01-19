@@ -7,12 +7,76 @@ use std::time::SystemTime;
 use crate::protocol::StepLogEntry;
 use crate::revision::ResolvedRevision;
 
+/// Reason why a job passed
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PassedReason {
+    /// Job passed and was merged into base branch
+    Merged,
+    /// Job passed but merge was skipped (--no-merge flag)
+    NoMerge,
+}
+
+/// Reason why a job failed
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FailedReason {
+    /// Pre-clone hook failed
+    PreClone,
+    /// Post-clone hook failed
+    PostClone,
+    /// The check command itself failed
+    Check,
+    /// Pre-merge hook failed
+    PreMerge,
+    /// The merge operation failed
+    Merge,
+    /// Failed to resolve base branch
+    BaseResolve,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MQJobStatus {
     Queued,
     Running,
-    Passed,
-    Failed,
+    Passed(PassedReason),
+    Failed(FailedReason),
+}
+
+impl MQJobStatus {
+    /// Format the status for display
+    pub fn display(&self) -> String {
+        match self {
+            MQJobStatus::Queued => "Queued".to_string(),
+            MQJobStatus::Running => "Running".to_string(),
+            MQJobStatus::Passed(reason) => {
+                let reason_str = match reason {
+                    PassedReason::Merged => "merged",
+                    PassedReason::NoMerge => "no-merge",
+                };
+                format!("Passed: {}", reason_str)
+            }
+            MQJobStatus::Failed(reason) => {
+                let reason_str = match reason {
+                    FailedReason::PreClone => "pre-clone",
+                    FailedReason::PostClone => "post-clone",
+                    FailedReason::Check => "check",
+                    FailedReason::PreMerge => "pre-merge",
+                    FailedReason::Merge => "merge",
+                    FailedReason::BaseResolve => "base-resolve",
+                };
+                format!("Failed: {}", reason_str)
+            }
+        }
+    }
+
+    /// Check if status represents a passed state
+    pub fn is_passed(&self) -> bool {
+        matches!(self, MQJobStatus::Passed(_))
+    }
+
+    /// Check if status represents a failed state
+    pub fn is_failed(&self) -> bool {
+        matches!(self, MQJobStatus::Failed(_))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

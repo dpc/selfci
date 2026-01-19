@@ -114,6 +114,7 @@ fn verify_daemon_running(daemon_dir: &Path) -> Result<bool, MainError> {
 struct MQState {
     root_dir: PathBuf,
     base_branch: String,
+    hooks: selfci::config::MQHooksConfig,
     next_job_id: u64,
     queued: HashMap<u64, mq_protocol::MQJobInfo>,
     active: HashMap<u64, mq_protocol::MQJobInfo>,
@@ -389,6 +390,18 @@ pub fn start_daemon(
         return Ok(());
     }
 
+    // Run pre-start hook BEFORE daemonization with inherited stdio
+    // This allows interactive commands (e.g., password prompts, keychain unlock)
+    let merged_config = selfci::config::read_merged_mq_config(&root_dir).unwrap_or_default();
+    if !run_hook_interactive(
+        merged_config.hooks.pre_start.as_ref(),
+        "pre-start",
+        &root_dir,
+    ) {
+        eprintln!("Pre-start hook failed, aborting daemon startup");
+        return Err(MainError::CheckFailed);
+    }
+
     let result = initialize_daemon_dir(&root_dir, foreground, log_file, &base_branch)?;
 
     // Handle parent vs child process
@@ -419,6 +432,17 @@ pub fn auto_start_daemon(root_dir: &Path) -> Result<Option<PathBuf>, MainError> 
     }
 
     println!("Auto-starting merge queue daemon...");
+
+    // Run pre-start hook BEFORE daemonization with inherited stdio
+    let merged_config = selfci::config::read_merged_mq_config(root_dir).unwrap_or_default();
+    if !run_hook_interactive(
+        merged_config.hooks.pre_start.as_ref(),
+        "pre-start",
+        root_dir,
+    ) {
+        eprintln!("Pre-start hook failed, aborting daemon startup");
+        return Err(MainError::CheckFailed);
+    }
 
     let result = initialize_daemon_dir(root_dir, false, None, &base_branch)?;
 
@@ -453,6 +477,63 @@ fn run_daemon_loop(
     root_dir: PathBuf,
     base_branch: String,
 ) -> Result<(), MainError> {
+    // Read merged config to get hooks
+    let merged_config = selfci::config::read_merged_mq_config(&root_dir).unwrap_or_default();
+    debug!(
+        "Loaded MQ hooks config: pre_start={}, post_start={}, pre_clone={}, post_clone={}, pre_merge={}, post_merge={}",
+        merged_config
+            .hooks
+            .pre_start
+            .as_ref()
+            .map(|h| h.is_set())
+            .unwrap_or(false),
+        merged_config
+            .hooks
+            .post_start
+            .as_ref()
+            .map(|h| h.is_set())
+            .unwrap_or(false),
+        merged_config
+            .hooks
+            .pre_clone
+            .as_ref()
+            .map(|h| h.is_set())
+            .unwrap_or(false),
+        merged_config
+            .hooks
+            .post_clone
+            .as_ref()
+            .map(|h| h.is_set())
+            .unwrap_or(false),
+        merged_config
+            .hooks
+            .pre_merge
+            .as_ref()
+            .map(|h| h.is_set())
+            .unwrap_or(false),
+        merged_config
+            .hooks
+            .post_merge
+            .as_ref()
+            .map(|h| h.is_set())
+            .unwrap_or(false),
+    );
+
+    // Run post-start hook if configured (after daemonization, with captured output)
+    // Note: pre-start hook runs BEFORE daemonization in start_daemon/auto_start_daemon
+    let post_start_result = run_hook(
+        merged_config.hooks.post_start.as_ref(),
+        "post-start",
+        &root_dir,
+    );
+    if !post_start_result.output.is_empty() {
+        eprintln!("Post-start hook output:\n{}", post_start_result.output);
+    }
+    if !post_start_result.success {
+        eprintln!("Post-start hook failed, aborting daemon startup");
+        return Err(MainError::CheckFailed);
+    }
+
     // Create shutdown flag
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -469,7 +550,7 @@ fn run_daemon_loop(
     // Set up signal handling using signal_hook's iterator API
     // This is more robust than the low-level pipe API
     use signal_hook::iterator::Signals;
-    let mut signals = Signals::new([SIGTERM]).map_err(|e| WorkDirError::CreateFailed(e.into()))?;
+    let mut signals = Signals::new([SIGTERM]).map_err(WorkDirError::CreateFailed)?;
 
     let shutdown_clone = Arc::clone(&shutdown);
     let socket_path_clone = socket_path.clone();
@@ -493,6 +574,7 @@ fn run_daemon_loop(
     let state = Arc::new(Mutex::new(MQState {
         root_dir: root_dir.clone(),
         base_branch: base_branch.clone(),
+        hooks: merged_config.hooks,
         next_job_id: 1,
         queued: HashMap::new(),
         active: HashMap::new(),
@@ -648,6 +730,147 @@ fn handle_request(
     }
 }
 
+/// Result of running a hook command
+struct HookResult {
+    success: bool,
+    output: String,
+}
+
+/// Environment variables for candidate-specific hooks
+struct CandidateHookEnv<'a> {
+    candidate_commit_id: &'a str,
+    candidate_change_id: &'a str,
+    candidate_id: &'a str,
+    base_branch: &'a str,
+}
+
+/// Run a hook command if configured and capture output
+fn run_hook(
+    hook: Option<&selfci::config::CommandConfig>,
+    hook_name: &str,
+    root_dir: &Path,
+) -> HookResult {
+    run_hook_with_env(hook, hook_name, root_dir, None)
+}
+
+/// Run a hook command with optional candidate environment variables
+fn run_hook_with_env(
+    hook: Option<&selfci::config::CommandConfig>,
+    hook_name: &str,
+    root_dir: &Path,
+    candidate_env: Option<&CandidateHookEnv<'_>>,
+) -> HookResult {
+    let Some(hook_config) = hook else {
+        return HookResult {
+            success: true,
+            output: String::new(),
+        };
+    };
+
+    if !hook_config.is_set() {
+        return HookResult {
+            success: true,
+            output: String::new(),
+        };
+    }
+
+    let full_command = hook_config.full_command();
+    debug!(hook = hook_name, command = ?full_command, "Running hook");
+
+    // Build command with optional candidate environment variables
+    let mut command = cmd(&full_command[0], &full_command[1..]);
+    command = command.dir(root_dir);
+
+    if let Some(env) = candidate_env {
+        command = command
+            .env(envs::SELFCI_CANDIDATE_COMMIT_ID, env.candidate_commit_id)
+            .env(envs::SELFCI_CANDIDATE_CHANGE_ID, env.candidate_change_id)
+            .env(envs::SELFCI_CANDIDATE_ID, env.candidate_id)
+            .env(envs::SELFCI_MQ_BASE_BRANCH, env.base_branch);
+    }
+
+    // Use stdout_capture() to capture output instead of inheriting parent's stdout
+    let result = command
+        .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
+        .run();
+
+    match result {
+        Ok(output) => {
+            let success = output.status.success();
+            let output_str = String::from_utf8_lossy(&output.stdout).to_string();
+
+            if success {
+                debug!(hook = hook_name, "Hook succeeded");
+            } else {
+                debug!(
+                    hook = hook_name,
+                    "Hook failed with exit code {:?}",
+                    output.status.code()
+                );
+            }
+
+            HookResult {
+                success,
+                output: output_str,
+            }
+        }
+        Err(e) => {
+            debug!(hook = hook_name, error = %e, "Hook execution error");
+            HookResult {
+                success: false,
+                output: format!("Failed to execute hook: {}", e),
+            }
+        }
+    }
+}
+
+/// Run a hook command with inherited stdio (for interactive use before daemonization)
+/// Returns true if hook succeeded or was not configured, false if it failed
+fn run_hook_interactive(
+    hook: Option<&selfci::config::CommandConfig>,
+    hook_name: &str,
+    root_dir: &Path,
+) -> bool {
+    let Some(hook_config) = hook else {
+        return true;
+    };
+
+    if !hook_config.is_set() {
+        return true;
+    }
+
+    let full_command = hook_config.full_command();
+    debug!(hook = hook_name, command = ?full_command, "Running interactive hook");
+
+    // Run with inherited stdio - no capture, allows user interaction
+    let result = cmd(&full_command[0], &full_command[1..])
+        .dir(root_dir)
+        .unchecked()
+        .run();
+
+    match result {
+        Ok(output) => {
+            let success = output.status.success();
+            if success {
+                debug!(hook = hook_name, "Interactive hook succeeded");
+            } else {
+                debug!(
+                    hook = hook_name,
+                    "Interactive hook failed with exit code {:?}",
+                    output.status.code()
+                );
+            }
+            success
+        }
+        Err(e) => {
+            eprintln!("Failed to execute {} hook: {}", hook_name, e);
+            false
+        }
+    }
+}
+
 fn process_queue(
     state: Arc<Mutex<MQState>>,
     root_dir: PathBuf,
@@ -672,15 +895,15 @@ fn process_queue(
             }
         };
 
-        // Move job from queued to active
-        let mut job_info = {
+        // Move job from queued to active and get hooks
+        let (mut job_info, hooks) = {
             let mut state = state.lock().unwrap();
             match state.queued.remove(&job_id) {
                 Some(mut job) => {
                     job.status = mq_protocol::MQJobStatus::Running;
                     job.started_at = Some(SystemTime::now());
                     state.active.insert(job_id, job.clone());
-                    job
+                    (job, state.hooks.clone())
                 }
                 None => {
                     debug!("Job {} not found in queued map", job_id);
@@ -702,13 +925,51 @@ fn process_queue(
             state.base_branch.clone()
         };
 
+        // Create candidate environment for hooks
+        let candidate_commit_id = job_info.candidate.commit_id.to_string();
+        let candidate_change_id = job_info.candidate.change_id.to_string();
+        let candidate_id = job_info.candidate.user.to_string();
+        let candidate_env = CandidateHookEnv {
+            candidate_commit_id: &candidate_commit_id,
+            candidate_change_id: &candidate_change_id,
+            candidate_id: &candidate_id,
+            base_branch: &base_branch,
+        };
+
+        // Run pre-clone hook if configured (runs before worktrees are created)
+        let pre_clone_result = run_hook_with_env(
+            hooks.pre_clone.as_ref(),
+            "pre-clone",
+            &root_dir,
+            Some(&candidate_env),
+        );
+        if !pre_clone_result.output.is_empty() {
+            job_info.output.push_str("### Pre-Clone Hook\n\n");
+            job_info.output.push_str(&pre_clone_result.output);
+            job_info.output.push('\n');
+        }
+        if !pre_clone_result.success {
+            job_info.status = mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::PreClone);
+            job_info.output.push_str("\nPre-clone hook failed\n");
+            job_info.completed_at = Some(SystemTime::now());
+
+            let mut state = state.lock().unwrap();
+            state.active.remove(&job_id);
+            state.completed.push(job_info);
+            continue;
+        }
+
         // Resolve base branch to immutable ID
         let resolved_base = match selfci::revision::resolve_revision(&vcs, &root_dir, &base_branch)
         {
             Ok(r) => r,
             Err(e) => {
-                job_info.status = mq_protocol::MQJobStatus::Failed;
-                job_info.output = format!("Failed to resolve base branch '{}': {}", base_branch, e);
+                job_info.status =
+                    mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::BaseResolve);
+                job_info.output.push_str(&format!(
+                    "Failed to resolve base branch '{}': {}",
+                    base_branch, e
+                ));
                 job_info.completed_at = Some(SystemTime::now());
 
                 let mut state = state.lock().unwrap();
@@ -723,6 +984,19 @@ fn process_queue(
             .map(|n| n.get())
             .unwrap_or(1);
 
+        // Build post-clone hook config if hook is configured
+        let post_clone_hook =
+            hooks
+                .post_clone
+                .as_ref()
+                .map(|hook| super::check::PostCloneHookConfig {
+                    hook,
+                    candidate_commit_id: &candidate_commit_id,
+                    candidate_change_id: &candidate_change_id,
+                    candidate_id: &candidate_id,
+                    base_branch: &base_branch,
+                });
+
         // Run the candidate check using the shared implementation
         match super::check::run_candidate_check(
             &root_dir,
@@ -731,8 +1005,31 @@ fn process_queue(
             parallelism,
             None,
             super::check::CheckMode::MergeQueue,
+            post_clone_hook,
         ) {
             Ok(result) => {
+                // Handle post-clone hook output if present
+                if let Some(output) = &result.post_clone_output {
+                    if !output.is_empty() {
+                        job_info.output.push_str("### Post-Clone Hook\n\n");
+                        job_info.output.push_str(output);
+                        job_info.output.push('\n');
+                    }
+                }
+
+                // Check if post-clone hook failed
+                if result.post_clone_success == Some(false) {
+                    job_info.status =
+                        mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::PostClone);
+                    job_info.output.push_str("\nPost-clone hook failed\n");
+                    job_info.completed_at = Some(SystemTime::now());
+
+                    let mut state = state.lock().unwrap();
+                    state.active.remove(&job_id);
+                    state.completed.push(job_info);
+                    continue;
+                }
+
                 // Check if any step failed (non-ignored)
                 let has_step_failure = result.steps.iter().any(|step| {
                     matches!(step.status, protocol::StepStatus::Failed { ignored: false })
@@ -745,50 +1042,106 @@ fn process_queue(
                     false
                 };
 
-                job_info.output = result.output;
+                // Store check output separately - this is what goes into the merge commit
+                // (without hook outputs)
+                let check_output = result.output.clone();
+
+                // Append check output to job output (preserving hook outputs)
+                job_info.output.push_str("### Check Output\n\n");
+                job_info.output.push_str(&result.output);
                 job_info.steps = result.steps;
                 job_info.completed_at = Some(SystemTime::now());
 
                 if job_passed {
-                    job_info.status = mq_protocol::MQJobStatus::Passed;
-
                     // Merge into base branch if no_merge is false
                     if job_info.no_merge {
                         debug!(
                             "MQ candidate check {} passed (no-merge mode, skipping merge)",
                             job_info.id
                         );
+                        job_info.status =
+                            mq_protocol::MQJobStatus::Passed(mq_protocol::PassedReason::NoMerge);
                     } else {
                         debug!(
                             "MQ candidate check {} passed, merging into {}",
                             job_info.id, base_branch
                         );
-                        match merge_candidate(
+
+                        // Run pre-merge hook if configured
+                        let pre_merge_result = run_hook_with_env(
+                            hooks.pre_merge.as_ref(),
+                            "pre-merge",
                             &root_dir,
-                            &base_branch,
-                            &job_info.candidate,
-                            &job_info.output,
-                        ) {
-                            Ok(merge_log) => {
-                                // Append merge output with separator
-                                job_info.output.push_str("\n\n### Merge Output\n\n");
-                                job_info.output.push_str(&merge_log);
-                            }
-                            Err(e) => {
-                                job_info
-                                    .output
-                                    .push_str(&format!("\n\n### Merge Failed\n\n{}", e));
-                                job_info.status = mq_protocol::MQJobStatus::Failed;
+                            Some(&candidate_env),
+                        );
+                        if !pre_merge_result.output.is_empty() {
+                            job_info.output.push_str("\n\n### Pre-Merge Hook\n\n");
+                            job_info.output.push_str(&pre_merge_result.output);
+                        }
+
+                        if !pre_merge_result.success {
+                            job_info
+                                .output
+                                .push_str("\n\nPre-merge hook failed, skipping merge\n");
+                            job_info.status = mq_protocol::MQJobStatus::Failed(
+                                mq_protocol::FailedReason::PreMerge,
+                            );
+                        } else {
+                            // Perform the merge - pass only check_output, not hook outputs
+                            match merge_candidate(
+                                &root_dir,
+                                &base_branch,
+                                &job_info.candidate,
+                                &check_output,
+                            ) {
+                                Ok(merge_log) => {
+                                    // Append merge output with separator
+                                    job_info.output.push_str("\n\n### Merge Output\n\n");
+                                    job_info.output.push_str(&merge_log);
+
+                                    // Run post-merge hook if configured
+                                    let post_merge_result = run_hook_with_env(
+                                        hooks.post_merge.as_ref(),
+                                        "post-merge",
+                                        &root_dir,
+                                        Some(&candidate_env),
+                                    );
+                                    if !post_merge_result.output.is_empty() {
+                                        job_info.output.push_str("\n\n### Post-Merge Hook\n\n");
+                                        job_info.output.push_str(&post_merge_result.output);
+                                    }
+
+                                    if !post_merge_result.success {
+                                        job_info.output.push_str("\n\nPost-merge hook failed\n");
+                                        // Note: merge already happened, so we still report success
+                                        // but log the hook failure
+                                    }
+
+                                    // Merge succeeded
+                                    job_info.status = mq_protocol::MQJobStatus::Passed(
+                                        mq_protocol::PassedReason::Merged,
+                                    );
+                                }
+                                Err(e) => {
+                                    job_info
+                                        .output
+                                        .push_str(&format!("\n\n### Merge Failed\n\n{}", e));
+                                    job_info.status = mq_protocol::MQJobStatus::Failed(
+                                        mq_protocol::FailedReason::Merge,
+                                    );
+                                }
                             }
                         }
                     }
                 } else {
-                    job_info.status = mq_protocol::MQJobStatus::Failed;
+                    job_info.status =
+                        mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::Check);
                     debug!("MQ candidate check {} failed", job_info.id);
                 }
             }
             Err(e) => {
-                job_info.status = mq_protocol::MQJobStatus::Failed;
+                job_info.status =
+                    mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::Check);
                 job_info.output = format!("Check failed: {}", e);
                 job_info.completed_at = Some(SystemTime::now());
                 debug!("MQ candidate check {} failed: {}", job_info.id, e);
@@ -1311,17 +1664,12 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
                 println!("No jobs in queue");
             } else {
                 println!(
-                    "{:<6} {:<10} {:<12} {:<10} {:<20} {:<20}",
+                    "{:<6} {:<20} {:<12} {:<10} {:<20} {:<20}",
                     "ID", "Status", "Change", "Commit", "Candidate", "Queued"
                 );
-                println!("{}", "-".repeat(82));
+                println!("{}", "-".repeat(92));
                 for job in jobs {
-                    let status = match job.status {
-                        mq_protocol::MQJobStatus::Queued => "Queued",
-                        mq_protocol::MQJobStatus::Running => "Running",
-                        mq_protocol::MQJobStatus::Passed => "Passed",
-                        mq_protocol::MQJobStatus::Failed => "Failed",
-                    };
+                    let status = job.status.display();
 
                     let queued = humantime::format_rfc3339_seconds(job.queued_at);
                     // Shorten change_id and commit_id to first 8 chars
@@ -1330,7 +1678,7 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
                     let commit_short = &job.candidate.commit_id.as_str()
                         [..job.candidate.commit_id.as_str().len().min(8)];
                     println!(
-                        "{:<6} {:<10} {:<12} {:<10} {:<20} {:<20}",
+                        "{:<6} {:<20} {:<12} {:<10} {:<20} {:<20}",
                         job.id,
                         status,
                         change_short,
@@ -1377,7 +1725,7 @@ pub fn get_status(job_id: u64) -> Result<(), MainError> {
                 "Candidate: {} (commit: {})",
                 job.candidate.user, job.candidate.commit_id
             );
-            println!("Status: {:?}", job.status);
+            println!("Status: {}", job.status.display());
             println!(
                 "Queued at: {}",
                 humantime::format_rfc3339_seconds(job.queued_at)

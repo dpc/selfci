@@ -17,6 +17,12 @@ pub struct RunJobRequest {
     pub job_full_command: Vec<String>,
     pub print_output: bool,
     pub socket_path: PathBuf,
+    /// Candidate commit ID (git/jj commit hash)
+    pub candidate_commit_id: String,
+    /// Candidate change ID (jj change ID, may be empty for git)
+    pub candidate_change_id: String,
+    /// Candidate ID (user-provided identifier)
+    pub candidate_id: String,
 }
 
 pub struct RunJobOutcome {
@@ -106,6 +112,9 @@ pub fn job_worker(
             .dir(&job.candidate_dir)
             .env(envs::SELFCI_BASE_DIR, &job.base_dir)
             .env(envs::SELFCI_CANDIDATE_DIR, &job.candidate_dir)
+            .env(envs::SELFCI_CANDIDATE_COMMIT_ID, &job.candidate_commit_id)
+            .env(envs::SELFCI_CANDIDATE_CHANGE_ID, &job.candidate_change_id)
+            .env(envs::SELFCI_CANDIDATE_ID, &job.candidate_id)
             .env(envs::SELFCI_JOB_NAME, &job.job_name)
             .env(envs::SELFCI_JOB_SOCK_PATH, &job.socket_path)
             .stderr_to_stdout()
@@ -173,6 +182,12 @@ pub struct JobSpawnContext {
     pub command: String,
     pub print_output: bool,
     pub socket_path: PathBuf,
+    /// Candidate commit ID (git/jj commit hash)
+    pub candidate_commit_id: String,
+    /// Candidate change ID (jj change ID, may be empty for git)
+    pub candidate_change_id: String,
+    /// Candidate ID (user-provided identifier)
+    pub candidate_id: String,
 }
 
 /// Control socket listener - handles step logging and job control
@@ -265,6 +280,13 @@ pub fn control_socket_listener(
                                         job_full_command: full_command,
                                         print_output: spawn_context_clone.print_output,
                                         socket_path: spawn_context_clone.socket_path.clone(),
+                                        candidate_commit_id: spawn_context_clone
+                                            .candidate_commit_id
+                                            .clone(),
+                                        candidate_change_id: spawn_context_clone
+                                            .candidate_change_id
+                                            .clone(),
+                                        candidate_id: spawn_context_clone.candidate_id.clone(),
                                     };
 
                                     match jobs_sender_clone.send(job_request) {
