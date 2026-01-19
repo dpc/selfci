@@ -12,6 +12,10 @@ categories = ["development-tools"]
 authors = ["dpc <dpc@dpc.pw>"]
 rust-version = "1.92"
 
+[lints.clippy]
+dbg_macro = "warn"
+literal_string_with_formatting_args = "deny"
+
 [[bin]]
 name = "selfci"
 path = "src/main.rs"
