@@ -44,6 +44,7 @@ fn wait_for_job_completion(repo_path: &Path, job_id: u64, timeout_secs: u64) -> 
 }
 
 /// Setup a Git repository with multi-commit candidate on a feature branch
+/// Creates diverging history so test merge/rebase produces different commit IDs
 fn setup_git_mq_repo(merge_style: &str) -> tempfile::TempDir {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -60,11 +61,14 @@ fn setup_git_mq_repo(merge_style: &str) -> tempfile::TempDir {
         .unwrap();
 
     // Create config with merge style
+    // CI command writes SELFCI_CANDIDATE_COMMIT_ID to .tested_commit_id so we can verify it changed
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
+    let commit_id_file = repo_path.join(".tested_commit_id");
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'true'\nmq:\n  base-branch: main\n  merge-style: {}\n",
+            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {}'\nmq:\n  base-branch: main\n  merge-style: {}\n",
+            commit_id_file.display(),
             merge_style
         ),
     )
@@ -118,7 +122,7 @@ fn setup_git_mq_repo(merge_style: &str) -> tempfile::TempDir {
         .run()
         .unwrap();
 
-    // Get the feature branch HEAD
+    // Get the feature branch HEAD (original candidate commit)
     let feature_commit = cmd!("git", "rev-parse", "HEAD")
         .dir(repo_path)
         .read()
@@ -126,11 +130,46 @@ fn setup_git_mq_repo(merge_style: &str) -> tempfile::TempDir {
         .trim()
         .to_string();
 
-    // Switch to a completely different state (back to main, modify a file)
+    // Switch back to main and create diverging history
+    // This ensures the test merge/rebase will produce a different commit ID
     cmd!("git", "checkout", "main")
         .dir(repo_path)
         .run()
         .unwrap();
+
+    // Add multiple commits on main AFTER feature branch was created (diverging history)
+    // This tests multi-commit merge/rebase on both sides
+    fs::write(repo_path.join("main_update1.txt"), "main update 1").unwrap();
+    cmd!("git", "add", "main_update1.txt")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("git", "commit", "-m", "Main branch update 1")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    fs::write(repo_path.join("main_update2.txt"), "main update 2").unwrap();
+    cmd!("git", "add", "main_update2.txt")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("git", "commit", "-m", "Main branch update 2")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    fs::write(repo_path.join("main_update3.txt"), "main update 3").unwrap();
+    cmd!("git", "add", "main_update3.txt")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("git", "commit", "-m", "Main branch update 3")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Create working file (simulating user's uncommitted work)
     fs::write(repo_path.join("working.txt"), "working on something else").unwrap();
 
     // Store feature commit for later use
@@ -140,6 +179,7 @@ fn setup_git_mq_repo(merge_style: &str) -> tempfile::TempDir {
 }
 
 /// Setup a Jujutsu repository with multi-commit candidate
+/// Creates diverging history so test merge/rebase produces different commit IDs
 fn setup_jj_mq_repo(merge_style: &str) -> tempfile::TempDir {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -148,11 +188,14 @@ fn setup_jj_mq_repo(merge_style: &str) -> tempfile::TempDir {
     cmd!("jj", "git", "init").dir(repo_path).run().unwrap();
 
     // Create config with merge style
+    // CI command writes SELFCI_CANDIDATE_COMMIT_ID to .tested_commit_id so we can verify it changed
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
+    let commit_id_file = repo_path.join(".tested_commit_id");
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'true'\nmq:\n  base-branch: main\n  merge-style: {}\n",
+            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {}'\nmq:\n  base-branch: main\n  merge-style: {}\n",
+            commit_id_file.display(),
             merge_style
         ),
     )
@@ -179,7 +222,7 @@ fn setup_jj_mq_repo(merge_style: &str) -> tempfile::TempDir {
         .run()
         .unwrap();
 
-    // Create feature commits
+    // Create feature commits (branching off from main)
     cmd!("jj", "new", "main").dir(repo_path).run().unwrap();
     fs::write(repo_path.join("feature1.txt"), "feature 1").unwrap();
     cmd!("jj", "file", "track", "feature1.txt")
@@ -213,7 +256,7 @@ fn setup_jj_mq_repo(merge_style: &str) -> tempfile::TempDir {
         .run()
         .unwrap();
 
-    // Get the feature commit ID
+    // Get the feature commit ID (original candidate)
     let feature_commit = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
         .dir(repo_path)
         .read()
@@ -221,7 +264,47 @@ fn setup_jj_mq_repo(merge_style: &str) -> tempfile::TempDir {
         .trim()
         .to_string();
 
-    // Switch to a completely different state
+    // Create diverging history on main (after feature branch was created)
+    // This tests multi-commit merge/rebase on both sides
+    cmd!("jj", "new", "main").dir(repo_path).run().unwrap();
+    fs::write(repo_path.join("main_update1.txt"), "main update 1").unwrap();
+    cmd!("jj", "file", "track", "main_update1.txt")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Main branch update 1")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    cmd!("jj", "new").dir(repo_path).run().unwrap();
+    fs::write(repo_path.join("main_update2.txt"), "main update 2").unwrap();
+    cmd!("jj", "file", "track", "main_update2.txt")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Main branch update 2")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    cmd!("jj", "new").dir(repo_path).run().unwrap();
+    fs::write(repo_path.join("main_update3.txt"), "main update 3").unwrap();
+    cmd!("jj", "file", "track", "main_update3.txt")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Main branch update 3")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    cmd!("jj", "bookmark", "set", "main")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Switch to working state
     cmd!("jj", "new", "main").dir(repo_path).run().unwrap();
     fs::write(repo_path.join("working.txt"), "working on something else").unwrap();
 
@@ -267,6 +350,110 @@ fn verify_working_dir_unchanged_jj(repo_path: &Path) {
     assert!(
         !repo_path.join("feature1.txt").exists(),
         "Feature files appeared in working directory!"
+    );
+}
+
+/// Verify that temporary git worktrees are cleaned up
+fn verify_git_worktrees_cleaned_up(repo_path: &Path) {
+    // List all worktrees
+    let output = cmd!("git", "worktree", "list")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+
+    // Should not contain any selfci-test-worktree entries
+    assert!(
+        !output.contains("selfci-test-worktree"),
+        "Temporary test worktree not cleaned up! Worktrees:\n{}",
+        output
+    );
+
+    // Also verify the worktree directory doesn't exist in .git
+    let git_dir = repo_path.join(".git");
+    if git_dir.is_dir() {
+        for entry in std::fs::read_dir(&git_dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            assert!(
+                !name.to_string_lossy().starts_with("selfci-test-worktree"),
+                "Temporary worktree directory not cleaned up: {:?}",
+                entry.path()
+            );
+        }
+    }
+}
+
+/// Verify that temporary jj commits don't leave orphaned bookmarks
+fn verify_jj_no_orphaned_bookmarks(repo_path: &Path) {
+    // List all bookmarks
+    let output = cmd!("jj", "bookmark", "list", "--all")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+
+    // Should only have expected bookmarks:
+    // - main: the base branch
+    // - main@git: git remote tracking
+    // - @git: special jj bookmark tracking git HEAD
+    // No selfci-test-* or other temporary bookmarks
+    for line in output.lines() {
+        let bookmark = line.split(':').next().unwrap_or("").trim();
+        let is_expected = bookmark.is_empty()
+            || bookmark == "main"
+            || bookmark.starts_with("main@")
+            || bookmark == "@git"
+            || bookmark.starts_with("@git@");
+        assert!(
+            is_expected,
+            "Unexpected bookmark found (possible orphaned test bookmark): {}",
+            bookmark
+        );
+    }
+}
+
+/// Verify that test merge commits have been cleaned up (abandoned)
+fn verify_jj_test_commits_cleaned_up(repo_path: &Path) {
+    // Get all visible commits (excluding hidden/abandoned ones)
+    // The test merge commits should have been abandoned and not appear here
+    let output = cmd!(
+        "jj",
+        "log",
+        "--no-graph",
+        "-T",
+        r#"change_id ++ " " ++ description.first_line() ++ "\n""#
+    )
+    .dir(repo_path)
+    .read()
+    .unwrap();
+
+    // Count how many "Feature commit 3" entries we have
+    // There should be exactly one (the final merged one)
+    // If test merge commits weren't cleaned up, we'd see duplicates
+    let feature3_count = output
+        .lines()
+        .filter(|line| line.contains("Feature commit 3"))
+        .count();
+
+    assert_eq!(
+        feature3_count, 1,
+        "Expected exactly 1 'Feature commit 3' in visible history, found {}.\n\
+         This may indicate test merge commits weren't properly abandoned.\n\
+         Visible commits:\n{}",
+        feature3_count, output
+    );
+
+    // Also check for any commits that look like duplicates (same description, different change ID)
+    // by verifying we have exactly 3 feature commits total
+    let feature_count = output
+        .lines()
+        .filter(|line| line.contains("Feature commit"))
+        .count();
+
+    assert_eq!(
+        feature_count, 3,
+        "Expected exactly 3 feature commits in visible history, found {}.\n\
+         This may indicate test merge commits weren't properly abandoned.\n\
+         Visible commits:\n{}",
+        feature_count, output
     );
 }
 
@@ -319,6 +506,40 @@ fn verify_merge_succeeded_git(repo_path: &Path, merge_style: &str) {
             "Feature commit 3 not in history"
         );
     }
+}
+
+/// Verify that the commit ID tested by CI differs from the original candidate
+/// This ensures the test merge/rebase actually happened before running CI
+fn verify_tested_commit_differs_from_original(repo_path: &Path) {
+    // Read original feature commit
+    let original_commit = fs::read_to_string(repo_path.join(".feature_commit"))
+        .expect("Failed to read .feature_commit")
+        .trim()
+        .to_string();
+
+    // Read the commit ID that was passed to CI (written by CI command)
+    let tested_commit = fs::read_to_string(repo_path.join(".tested_commit_id"))
+        .expect("Failed to read .tested_commit_id - CI command may not have run")
+        .trim()
+        .to_string();
+
+    assert!(
+        !tested_commit.is_empty(),
+        "Tested commit ID is empty - CI command may not have run correctly"
+    );
+
+    assert_ne!(
+        original_commit, tested_commit,
+        "SELFCI_CANDIDATE_COMMIT_ID should differ from original candidate commit!\n\
+         Original: {}\n\
+         Tested:   {}\n\
+         This means the test merge/rebase didn't happen before running CI.",
+        original_commit, tested_commit
+    );
+
+    eprintln!("\n=== Commit ID verification ===");
+    eprintln!("Original candidate commit: {}", original_commit);
+    eprintln!("Tested commit (after merge/rebase): {}", tested_commit);
 }
 
 /// Verify that main bookmark has the feature commits
@@ -405,8 +626,14 @@ fn test_git_rebase_merge() {
     // Verify working directory unchanged
     verify_working_dir_unchanged_git(repo_path);
 
+    // Verify the tested commit differs from original (test merge/rebase happened)
+    verify_tested_commit_differs_from_original(repo_path);
+
     // Verify merge succeeded
     verify_merge_succeeded_git(repo_path, "rebase");
+
+    // Verify temporary worktrees are cleaned up
+    verify_git_worktrees_cleaned_up(repo_path);
 
     // Display commit log for visual inspection
     eprintln!("\n=== git rebase merge result ===");
@@ -455,7 +682,11 @@ fn test_git_merge_merge() {
         .unwrap();
 
     verify_working_dir_unchanged_git(repo_path);
+    verify_tested_commit_differs_from_original(repo_path);
     verify_merge_succeeded_git(repo_path, "merge");
+
+    // Verify temporary worktrees are cleaned up
+    verify_git_worktrees_cleaned_up(repo_path);
 
     // Display commit log for visual inspection
     eprintln!("\n=== git merge merge result ===");
@@ -510,7 +741,14 @@ fn test_jj_rebase_merge() {
         .unwrap();
 
     verify_working_dir_unchanged_jj(repo_path);
+    verify_tested_commit_differs_from_original(repo_path);
     verify_merge_succeeded_jj(repo_path, "rebase");
+
+    // Verify no orphaned bookmarks from test merge
+    verify_jj_no_orphaned_bookmarks(repo_path);
+
+    // Verify test merge commits were cleaned up (abandoned)
+    verify_jj_test_commits_cleaned_up(repo_path);
 
     // Display commit log for visual inspection
     eprintln!("\n=== jj rebase merge result ===");
@@ -558,7 +796,14 @@ fn test_jj_merge_merge() {
         .unwrap();
 
     verify_working_dir_unchanged_jj(repo_path);
+    verify_tested_commit_differs_from_original(repo_path);
     verify_merge_succeeded_jj(repo_path, "merge");
+
+    // Verify no orphaned bookmarks from test merge
+    verify_jj_no_orphaned_bookmarks(repo_path);
+
+    // Verify test merge commits were cleaned up (abandoned)
+    verify_jj_test_commits_cleaned_up(repo_path);
 
     // Display commit log for visual inspection
     eprintln!("\n=== jj merge merge result ===");

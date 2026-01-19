@@ -23,6 +23,10 @@ pub enum FailedReason {
     PreClone,
     /// Post-clone hook failed
     PostClone,
+    /// Test rebase (before CI check) failed
+    TestRebase,
+    /// Test merge (before CI check) failed
+    TestMerge,
     /// The check command itself failed
     Check,
     /// Pre-merge hook failed
@@ -58,9 +62,11 @@ impl MQJobStatus {
                 let reason_str = match reason {
                     FailedReason::PreClone => "pre-clone",
                     FailedReason::PostClone => "post-clone",
+                    FailedReason::TestRebase => "rebase",
+                    FailedReason::TestMerge => "merge",
                     FailedReason::Check => "check",
                     FailedReason::PreMerge => "pre-merge",
-                    FailedReason::Merge => "merge",
+                    FailedReason::Merge => "final-merge",
                     FailedReason::BaseResolve => "base-resolve",
                 };
                 format!("Failed: {}", reason_str)
