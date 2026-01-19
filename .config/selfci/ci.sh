@@ -58,6 +58,11 @@ function job_cargo() {
     fi
 }
 
+if [ "${1-:}" = "job_lint" ]; then
+  job_lint
+  exit 0
+fi
+
 case "$SELFCI_JOB_NAME" in
   main)
     selfci job start "lint"
@@ -74,8 +79,7 @@ case "$SELFCI_JOB_NAME" in
 
   lint)
     # use develop shell to ensure all the tools are provided at pinned versions
-    export -f job_lint
-    nix develop -c bash -c "job_lint"
+    nix develop -c $0 "job_lint"
     ;;
 
   *)
