@@ -122,6 +122,143 @@ struct MQState {
     completed: Vec<mq_protocol::MQJobInfo>,
 }
 
+impl MQState {
+    /// Create and queue a new job, returning the job ID
+    fn queue_job(
+        &mut self,
+        candidate: selfci::revision::ResolvedRevision,
+        no_merge: bool,
+    ) -> mq_protocol::MQJobInfo {
+        let job_id = self.next_job_id;
+        self.next_job_id += 1;
+
+        let job = mq_protocol::MQJobInfo {
+            id: job_id,
+            candidate,
+            status: mq_protocol::MQJobStatus::Queued,
+            queued_at: SystemTime::now(),
+            started_at: None,
+            completed_at: None,
+            output: String::new(),
+            steps: Vec::new(),
+            no_merge,
+        };
+
+        self.queued.insert(job_id, job.clone());
+        job
+    }
+
+    /// Move a job from queued to active (start processing it)
+    /// Returns the job info along with hooks and merge_style needed for processing
+    fn start_job(
+        &mut self,
+        job_id: u64,
+    ) -> Option<(
+        mq_protocol::MQJobInfo,
+        selfci::config::MQHooksConfig,
+        selfci::config::MergeStyle,
+    )> {
+        let mut job = self.queued.remove(&job_id)?;
+        job.status = mq_protocol::MQJobStatus::Running;
+        job.started_at = Some(SystemTime::now());
+        self.active.insert(job_id, job.clone());
+        Some((job, self.hooks.clone(), self.merge_style.clone()))
+    }
+
+    /// Move a job from active to completed
+    fn complete_job(&mut self, job_id: u64, job_info: mq_protocol::MQJobInfo) {
+        self.active.remove(&job_id);
+        self.completed.push(job_info);
+    }
+
+    /// Get a job by ID (searches queued, active, and completed)
+    fn get_job(&self, job_id: u64) -> Option<mq_protocol::MQJobInfo> {
+        self.queued
+            .get(&job_id)
+            .or_else(|| self.active.get(&job_id))
+            .cloned()
+            .or_else(|| self.completed.iter().find(|j| j.id == job_id).cloned())
+    }
+
+    /// List all jobs (queued, active, completed), sorted by ID descending, with optional limit
+    fn list_jobs(&self, limit: Option<usize>) -> Vec<mq_protocol::MQJobInfo> {
+        let mut jobs: Vec<_> = self
+            .queued
+            .values()
+            .chain(self.active.values())
+            .chain(self.completed.iter())
+            .cloned()
+            .collect();
+
+        jobs.sort_by(|a, b| b.id.cmp(&a.id));
+
+        if let Some(limit) = limit {
+            jobs.truncate(limit);
+        }
+
+        jobs
+    }
+
+    /// Get the root directory
+    fn root_dir(&self) -> &Path {
+        &self.root_dir
+    }
+
+    /// Get the base branch name
+    fn base_branch(&self) -> &str {
+        &self.base_branch
+    }
+}
+
+/// Thread-safe wrapper around MQState that handles locking
+#[derive(Clone)]
+struct SharedMQState(Arc<Mutex<MQState>>);
+
+impl SharedMQState {
+    fn new(state: MQState) -> Self {
+        Self(Arc::new(Mutex::new(state)))
+    }
+
+    fn queue_job(
+        &self,
+        candidate: selfci::revision::ResolvedRevision,
+        no_merge: bool,
+    ) -> mq_protocol::MQJobInfo {
+        self.0.lock().unwrap().queue_job(candidate, no_merge)
+    }
+
+    fn start_job(
+        &self,
+        job_id: u64,
+    ) -> Option<(
+        mq_protocol::MQJobInfo,
+        selfci::config::MQHooksConfig,
+        selfci::config::MergeStyle,
+    )> {
+        self.0.lock().unwrap().start_job(job_id)
+    }
+
+    fn complete_job(&self, job_id: u64, job_info: mq_protocol::MQJobInfo) {
+        self.0.lock().unwrap().complete_job(job_id, job_info)
+    }
+
+    fn get_job(&self, job_id: u64) -> Option<mq_protocol::MQJobInfo> {
+        self.0.lock().unwrap().get_job(job_id)
+    }
+
+    fn list_jobs(&self, limit: Option<usize>) -> Vec<mq_protocol::MQJobInfo> {
+        self.0.lock().unwrap().list_jobs(limit)
+    }
+
+    fn root_dir(&self) -> PathBuf {
+        self.0.lock().unwrap().root_dir().to_path_buf()
+    }
+
+    fn base_branch(&self) -> String {
+        self.0.lock().unwrap().base_branch().to_string()
+    }
+}
+
 /// Resolve the base branch from CLI argument or config file
 fn resolve_base_branch(base_branch: Option<String>, root_dir: &Path) -> Result<String, MainError> {
     if let Some(branch) = base_branch {
@@ -572,7 +709,7 @@ fn run_daemon_loop(
     });
 
     // Initialize state
-    let state = Arc::new(Mutex::new(MQState {
+    let state = SharedMQState::new(MQState {
         root_dir: root_dir.clone(),
         base_branch: base_branch.clone(),
         merge_style: merged_config.merge_style,
@@ -581,13 +718,13 @@ fn run_daemon_loop(
         queued: HashMap::new(),
         active: HashMap::new(),
         completed: Vec::new(),
-    }));
+    });
 
     // Create channel for queueing jobs
     let (mq_jobs_sender, mq_jobs_receiver) = mpsc::channel::<u64>();
 
     // Spawn worker thread to process queue
-    let state_clone = Arc::clone(&state);
+    let state_clone = state.clone();
     let root_dir_clone = root_dir.clone();
     std::thread::spawn(move || {
         // process_queue creates worker pools for each candidate check via run_candidate_check
@@ -608,11 +745,11 @@ fn run_daemon_loop(
 
         match accepted {
             Ok((mut stream, _)) => {
-                let state_clone = Arc::clone(&state);
+                let state_clone = state.clone();
                 let mq_jobs_sender_clone = mq_jobs_sender.clone();
                 std::thread::spawn(move || {
                     if let Ok(request) = mq_protocol::read_mq_request(&mut stream) {
-                        let response = handle_request(state_clone, request, mq_jobs_sender_clone);
+                        let response = handle_request(&state_clone, request, mq_jobs_sender_clone);
                         let _ = mq_protocol::write_mq_response(&mut stream, response);
                     }
                 });
@@ -627,7 +764,7 @@ fn run_daemon_loop(
 }
 
 fn handle_request(
-    state: Arc<Mutex<MQState>>,
+    state: &SharedMQState,
     request: mq_protocol::MQRequest,
     mq_jobs_sender: mpsc::Sender<u64>,
 ) -> mq_protocol::MQResponse {
@@ -639,14 +776,10 @@ fn handle_request(
             no_merge,
         } => {
             // Get root_dir and VCS for resolution
-            let (root_dir, vcs) = {
-                let state = state.lock().unwrap();
-                let root_dir = state.root_dir.clone();
-                let vcs = match get_vcs(&root_dir, None) {
-                    Ok(v) => v,
-                    Err(e) => return mq_protocol::MQResponse::Error(format!("VCS error: {}", e)),
-                };
-                (root_dir, vcs)
+            let root_dir = state.root_dir();
+            let vcs = match get_vcs(&root_dir, None) {
+                Ok(v) => v,
+                Err(e) => return mq_protocol::MQResponse::Error(format!("VCS error: {}", e)),
             };
 
             // Resolve candidate to immutable IDs
@@ -661,72 +794,31 @@ fn handle_request(
                     }
                 };
 
-            let (job_id, send_result) = {
-                let mut state = state.lock().unwrap();
-                let job_id = state.next_job_id;
-                state.next_job_id += 1;
+            let job = state.queue_job(resolved_candidate.clone(), no_merge);
+            let job_id = job.id;
 
-                let job = mq_protocol::MQJobInfo {
-                    id: job_id,
-                    candidate: resolved_candidate.clone(),
-                    status: mq_protocol::MQJobStatus::Queued,
-                    queued_at: SystemTime::now(),
-                    started_at: None,
-                    completed_at: None,
-                    output: String::new(),
-                    steps: Vec::new(),
-                    no_merge,
-                };
+            debug!(
+                candidate_user = %resolved_candidate.user,
+                candidate_commit = %resolved_candidate.commit_id,
+                job_id,
+                no_merge,
+                "Added candidate to queue"
+            );
 
-                state.queued.insert(job_id, job);
-                debug!(
-                    candidate_user = %resolved_candidate.user,
-                    candidate_commit = %resolved_candidate.commit_id,
-                    job_id,
-                    no_merge,
-                    "Added candidate to queue"
-                );
-
-                // Send job ID to process_queue
-                let send_result = mq_jobs_sender.send(job_id);
-                (job_id, send_result)
-            };
-
-            match send_result {
+            // Send job ID to process_queue
+            match mq_jobs_sender.send(job_id) {
                 Ok(_) => mq_protocol::MQResponse::CandidateAdded { job_id },
                 Err(e) => mq_protocol::MQResponse::Error(format!("Failed to queue job: {}", e)),
             }
         }
 
         mq_protocol::MQRequest::List { limit } => {
-            let state = state.lock().unwrap();
-            let mut jobs: Vec<_> = state
-                .queued
-                .values()
-                .chain(state.active.values())
-                .chain(state.completed.iter())
-                .cloned()
-                .collect();
-
-            // Sort by ID descending (most recent first)
-            jobs.sort_by(|a, b| b.id.cmp(&a.id));
-
-            if let Some(limit) = limit {
-                jobs.truncate(limit);
-            }
-
+            let jobs = state.list_jobs(limit);
             mq_protocol::MQResponse::JobList { jobs }
         }
 
         mq_protocol::MQRequest::GetStatus { job_id } => {
-            let state = state.lock().unwrap();
-            let job = state
-                .queued
-                .get(&job_id)
-                .or_else(|| state.active.get(&job_id))
-                .cloned()
-                .or_else(|| state.completed.iter().find(|j| j.id == job_id).cloned());
-
+            let job = state.get_job(job_id);
             mq_protocol::MQResponse::JobStatus { job }
         }
     }
@@ -876,11 +968,7 @@ fn run_hook_interactive(
     }
 }
 
-fn process_queue(
-    state: Arc<Mutex<MQState>>,
-    root_dir: PathBuf,
-    mq_jobs_receiver: mpsc::Receiver<u64>,
-) {
+fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc::Receiver<u64>) {
     // Get VCS once at the start
     let vcs = match get_vcs(&root_dir, None) {
         Ok(v) => v,
@@ -901,19 +989,11 @@ fn process_queue(
         };
 
         // Move job from queued to active and get hooks and merge_style
-        let (mut job_info, hooks, merge_style) = {
-            let mut state = state.lock().unwrap();
-            match state.queued.remove(&job_id) {
-                Some(mut job) => {
-                    job.status = mq_protocol::MQJobStatus::Running;
-                    job.started_at = Some(SystemTime::now());
-                    state.active.insert(job_id, job.clone());
-                    (job, state.hooks.clone(), state.merge_style.clone())
-                }
-                None => {
-                    debug!("Job {} not found in queued map", job_id);
-                    continue;
-                }
+        let (mut job_info, hooks, merge_style) = match state.start_job(job_id) {
+            Some(result) => result,
+            None => {
+                debug!("Job {} not found in queued map", job_id);
+                continue;
             }
         };
 
@@ -925,10 +1005,7 @@ fn process_queue(
         );
 
         // Get base branch
-        let base_branch = {
-            let state = state.lock().unwrap();
-            state.base_branch.clone()
-        };
+        let base_branch = state.base_branch();
 
         // Create candidate environment for hooks
         let candidate_commit_id = job_info.candidate.commit_id.to_string();
@@ -957,10 +1034,7 @@ fn process_queue(
             job_info.status = mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::PreClone);
             job_info.output.push_str("\nPre-clone hook failed\n");
             job_info.completed_at = Some(SystemTime::now());
-
-            let mut state = state.lock().unwrap();
-            state.active.remove(&job_id);
-            state.completed.push(job_info);
+            state.complete_job(job_id, job_info);
             continue;
         }
 
@@ -976,10 +1050,7 @@ fn process_queue(
                     base_branch, e
                 ));
                 job_info.completed_at = Some(SystemTime::now());
-
-                let mut state = state.lock().unwrap();
-                state.active.remove(&job_id);
-                state.completed.push(job_info);
+                state.complete_job(job_id, job_info);
                 continue;
             }
         };
@@ -999,10 +1070,7 @@ fn process_queue(
                         e
                     ));
                     job_info.completed_at = Some(SystemTime::now());
-
-                    let mut state = state.lock().unwrap();
-                    state.active.remove(&job_id);
-                    state.completed.push(job_info);
+                    state.complete_job(job_id, job_info);
                     continue;
                 }
             };
@@ -1076,10 +1144,7 @@ fn process_queue(
                         mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::PostClone);
                     job_info.output.push_str("\nPost-clone hook failed\n");
                     job_info.completed_at = Some(SystemTime::now());
-
-                    let mut state = state.lock().unwrap();
-                    state.active.remove(&job_id);
-                    state.completed.push(job_info);
+                    state.complete_job(job_id, job_info);
                     continue;
                 }
 
@@ -1203,11 +1268,7 @@ fn process_queue(
         }
 
         // Move job from active to completed
-        {
-            let mut state = state.lock().unwrap();
-            state.active.remove(&job_id);
-            state.completed.push(job_info);
-        }
+        state.complete_job(job_id, job_info);
     }
 }
 
