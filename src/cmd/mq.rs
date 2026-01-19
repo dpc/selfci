@@ -1110,11 +1110,15 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
 
         // Set up cleanup guard for jj test merge commits
         // This ensures cleanup happens regardless of check success/failure
+        // NOTE: We use base_branch (ref name) rather than commit ID because the actual
+        // merge (if check passes) will advance main, and we want cleanup to exclude
+        // ancestors of the NEW main (post-merge), not the old one.
         let _jj_cleanup_guard = if matches!(vcs, selfci::VCS::Jujutsu) {
             let cleanup_root_dir = root_dir.clone();
             let cleanup_change_id = merged_change_id.clone();
+            let cleanup_base_ref = base_branch.to_string();
             Some(scopeguard::guard((), move |_| {
-                cleanup_jj_test_merge(&cleanup_root_dir, &cleanup_change_id);
+                cleanup_jj_test_merge(&cleanup_root_dir, &cleanup_change_id, &cleanup_base_ref);
             }))
         } else {
             None
@@ -1309,11 +1313,11 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
 }
 
 /// Result of a test merge operation (merge/rebase before CI check)
-struct TestMergeResult {
+pub(crate) struct TestMergeResult {
     /// The commit ID of the merged/rebased commit
-    commit_id: selfci::revision::CommitId,
+    pub(crate) commit_id: selfci::revision::CommitId,
     /// The change ID (for jujutsu, same as commit_id for git)
-    change_id: selfci::revision::ChangeId,
+    pub(crate) change_id: selfci::revision::ChangeId,
 }
 
 /// Test rebase for Git - rebases candidate onto base without updating any refs
@@ -1456,14 +1460,17 @@ fn test_merge_git_merge(
 /// Clean up temporary jj commits created by test merge
 /// For rebase mode: abandons the duplicated commits (entire branch)
 /// For merge mode: abandons the temporary merge commit
-fn cleanup_jj_test_merge(root_dir: &Path, test_change_id: &str) {
-    debug!(change_id = %test_change_id, "Cleaning up jj test merge commits");
+///
+/// The `base_ref` parameter is used to exclude ancestors of the base from abandoning.
+/// It can be a branch name (like "main") or a commit ID.
+pub(crate) fn cleanup_jj_test_merge(root_dir: &Path, test_change_id: &str, base_ref: &str) {
+    debug!(change_id = %test_change_id, base = %base_ref, "Cleaning up jj test merge commits");
 
     // Abandon the test merge commit(s)
     // For rebase mode, we need to abandon the entire duplicated branch, not just the tip
     // Use revset ::change_id to get the change and all its ancestors
-    // The "~ ::main" part excludes ancestors of main, leaving only the duplicated commits
-    let revset = format!("::{}~ ::main", test_change_id);
+    // The "~ ::base_ref" part excludes ancestors of base, leaving only the duplicated commits
+    let revset = format!("::{} ~ ::{}", test_change_id, base_ref);
     match cmd!("jj", "--ignore-working-copy", "abandon", &revset)
         .dir(root_dir)
         .stderr_to_stdout()
@@ -1669,7 +1676,7 @@ fn test_merge_jj_merge(
 
 /// Create a test merge/rebase of candidate onto base for CI testing
 /// This does NOT update any refs - the resulting commit is dangling (Git) or just exists (jj)
-fn create_test_merge(
+pub(crate) fn create_test_merge(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,

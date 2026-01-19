@@ -607,6 +607,72 @@ pub fn check(
         base = %resolved_base.user,
         "Starting check"
     );
+
+    // Read config to get merge style (default to Rebase)
+    let merge_style = read_config(&root_dir)
+        .ok()
+        .and_then(|c| c.mq)
+        .map(|mq| mq.merge_style)
+        .unwrap_or_default();
+
+    debug!(merge_style = ?merge_style, "Using merge style for test merge");
+
+    // Create test merge/rebase of candidate onto base for CI testing
+    // This ensures we test what would actually be merged, just like MQ mode
+    // Skip test merge if base and candidate are the same commit (nothing to merge)
+    let (merged_candidate, _jj_cleanup_guard): (_, Option<scopeguard::ScopeGuard<(), _>>) =
+        if resolved_base.commit_id == resolved_candidate.commit_id {
+            debug!("Base and candidate are the same commit, skipping test merge");
+            (resolved_candidate.clone(), None)
+        } else {
+            // Use the resolved base commit ID (works with both branch names and commit hashes)
+            let test_merge_result = super::mq::create_test_merge(
+                &root_dir,
+                resolved_base.commit_id.as_str(),
+                &resolved_candidate,
+                &merge_style,
+            )
+            .map_err(|e| {
+                eprintln!("Failed to create test merge: {}", e);
+                CheckError::CheckFailed
+            })?;
+
+            let merged_commit_id = test_merge_result.commit_id.to_string();
+            let merged_change_id = test_merge_result.change_id.to_string();
+
+            debug!(
+                merged_commit = %merged_commit_id,
+                merged_change = %merged_change_id,
+                "Created test merge"
+            );
+
+            // Set up cleanup guard for jj test merge commits
+            // This ensures cleanup happens regardless of check success/failure
+            let cleanup_guard = if matches!(vcs, selfci::VCS::Jujutsu) {
+                let cleanup_root_dir = root_dir.clone();
+                let cleanup_change_id = merged_change_id.clone();
+                let cleanup_base_commit = resolved_base.commit_id.to_string();
+                Some(scopeguard::guard((), move |_| {
+                    super::mq::cleanup_jj_test_merge(
+                        &cleanup_root_dir,
+                        &cleanup_change_id,
+                        &cleanup_base_commit,
+                    );
+                }))
+            } else {
+                None
+            };
+
+            // Create a ResolvedRevision for the merged commit
+            let merged = selfci::revision::ResolvedRevision {
+                user: resolved_candidate.user.clone(),
+                commit_id: test_merge_result.commit_id,
+                change_id: test_merge_result.change_id,
+            };
+
+            (merged, cleanup_guard)
+        };
+
     // Determine parallelism level
     let parallelism = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -617,18 +683,26 @@ pub fn check(
 
     debug!("Running jobs with parallelism {}", parallelism);
 
+    // Determine if a test merge was actually performed
+    // If base == candidate, no merge happened, so don't set SELFCI_MERGED_*
+    let original_candidate = if resolved_base.commit_id == resolved_candidate.commit_id {
+        None // No merge performed, SELFCI_MERGED_* won't be set
+    } else {
+        Some(&resolved_candidate) // Merge performed, set SELFCI_MERGED_*
+    };
+
     // Run the candidate check using shared implementation
-    // Note: post-clone hooks are only for MQ, not inline checks
-    // Note: original_candidate is None because there's no test merge in regular check mode
+    // Pass merged commit as the working candidate (what CI tests)
+    // Pass original candidate so SELFCI_CANDIDATE_* refers to what user specified
     let result = run_candidate_check(
         &root_dir,
         &resolved_base,
-        &resolved_candidate,
+        &merged_candidate,
         parallelism,
         forced_vcs,
         CheckMode::Inline { print_output },
         None, // No post-clone hook for inline checks
-        None, // No original candidate (no test merge in regular check mode)
+        original_candidate,
     )?;
 
     // Print total time

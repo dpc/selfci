@@ -20,12 +20,14 @@ The same command runs for all jobs. Use `$SELFCI_JOB_NAME` to differentiate beha
 
 Jobs run in a temporary clone of the candidate commit. The config is read from the **base** commit (not the candidate) to prevent bypassing CI by modifying the config.
 
+Before running CI, selfci performs a **test merge/rebase** of the candidate onto the base. This ensures that CI tests the merged result, not just the candidate in isolation. This catches integration issues where the candidate would conflict or break when combined with changes on the base branch.
+
 Two worktrees are created:
 
 - **Base worktree**: Contains the base commit (e.g., `main` branch)
-- **Candidate worktree**: Contains the candidate commit being tested
+- **Candidate worktree**: Contains the **test-merged** candidate commit
 
-The job command runs in the candidate worktree directory.
+The job command runs in the candidate worktree directory. After the check completes, the test merge is cleaned up (it's never pushed or permanently stored).
 
 ## Environment Variables
 
@@ -41,9 +43,11 @@ The following environment variables are available to job commands:
 | `SELFCI_CANDIDATE_CHANGE_ID` | Jujutsu change ID of the original candidate (same as commit ID for git) |
 | `SELFCI_CANDIDATE_ID` | User-provided revision string (e.g., "HEAD", branch name) |
 
-### MQ Mode Only
+### Test Merge Environment Variables
 
-When running via the merge queue (`selfci mq`), CI tests a merged/rebased commit rather than the original candidate. Additional environment variables are provided:
+Both `selfci check` and `selfci mq` perform a test merge/rebase of the candidate onto the base before running CI. This ensures CI tests what would actually be merged, catching integration issues early.
+
+When base and candidate differ (diverging history), additional environment variables are provided:
 
 | Variable | Description |
 |----------|-------------|
@@ -55,7 +59,9 @@ When running via the merge queue (`selfci mq`), CI tests a merged/rebased commit
 - Reference the original candidate for display/logging purposes
 - Know what commit hash the test worktree actually contains
 
-In regular `selfci check` mode, `SELFCI_MERGED_*` is not set.
+When base and candidate are the same commit (no diverging history), `SELFCI_MERGED_*` is not set since no merge is needed.
+
+The merge style (rebase or merge) is controlled by the `mq.merge-style` config option (defaults to `rebase`).
 
 ## Steps
 
