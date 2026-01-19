@@ -44,14 +44,18 @@ pub struct CheckResult {
 pub struct PostCloneHookConfig<'a> {
     /// The hook command configuration
     pub hook: &'a CommandConfig,
-    /// Candidate commit ID
+    /// Candidate commit ID (original user-submitted commit)
     pub candidate_commit_id: &'a str,
-    /// Candidate change ID
+    /// Candidate change ID (original jj change ID)
     pub candidate_change_id: &'a str,
     /// Candidate ID (user-provided revision string)
     pub candidate_id: &'a str,
     /// Base branch name
     pub base_branch: &'a str,
+    /// Merged commit ID (MQ only: commit after test merge/rebase)
+    pub merged_commit_id: Option<&'a str>,
+    /// Merged change ID (MQ only: jj change ID after test merge/rebase)
+    pub merged_change_id: Option<&'a str>,
 }
 
 impl CheckMode {
@@ -80,7 +84,7 @@ fn run_post_clone_hook(
     let full_command = hook_config.hook.full_command();
     debug!(command = ?full_command, "Running post-clone hook");
 
-    let result = cmd(&full_command[0], &full_command[1..])
+    let mut command = cmd(&full_command[0], &full_command[1..])
         .dir(root_dir)
         .env(envs::SELFCI_VERSION, env!("CARGO_PKG_VERSION"))
         .env(envs::SELFCI_BASE_DIR, base_dir)
@@ -94,7 +98,17 @@ fn run_post_clone_hook(
             hook_config.candidate_change_id,
         )
         .env(envs::SELFCI_CANDIDATE_ID, hook_config.candidate_id)
-        .env(envs::SELFCI_MQ_BASE_BRANCH, hook_config.base_branch)
+        .env(envs::SELFCI_MQ_BASE_BRANCH, hook_config.base_branch);
+
+    // Add merged env vars if present (MQ mode only)
+    if let Some(merged_commit_id) = hook_config.merged_commit_id {
+        command = command.env(envs::SELFCI_MERGED_COMMIT_ID, merged_commit_id);
+    }
+    if let Some(merged_change_id) = hook_config.merged_change_id {
+        command = command.env(envs::SELFCI_MERGED_CHANGE_ID, merged_change_id);
+    }
+
+    let result = command
         .stderr_to_stdout()
         .stdout_capture()
         .unchecked()
@@ -117,6 +131,12 @@ fn run_post_clone_hook(
 ///
 /// If `post_clone_hook` is provided, it will be run after worktrees are created but before
 /// the job starts. The hook receives environment variables for the worktree paths.
+///
+/// The `original_candidate` parameter is used in MQ mode to distinguish between:
+/// - The original candidate (what the user submitted) -> SELFCI_CANDIDATE_* env vars
+/// - The working candidate (after test merge/rebase) -> SELFCI_MERGED_* env vars
+///
+/// In regular check mode, `original_candidate` is None and SELFCI_MERGED_* is not set.
 pub fn run_candidate_check(
     root_dir: &Path,
     base_rev: &ResolvedRevision,
@@ -125,6 +145,7 @@ pub fn run_candidate_check(
     forced_vcs: Option<&str>,
     mode: CheckMode,
     post_clone_hook: Option<PostCloneHookConfig<'_>>,
+    original_candidate: Option<&ResolvedRevision>,
 ) -> Result<CheckResult, MainError> {
     // Get VCS (forced or auto-detected)
     let vcs = get_vcs(root_dir, forced_vcs)?;
@@ -238,6 +259,21 @@ pub fn run_candidate_check(
     let jobs_sender_clone = jobs_sender.clone();
     let messages_sender_clone = messages_sender.clone();
     let listener_shutdown_clone = Arc::clone(&listener_shutdown);
+    // Determine which revision info to use for SELFCI_CANDIDATE_* env vars
+    // In MQ mode, original_candidate is the user's submitted revision
+    // In regular check mode, it's the same as candidate_rev
+    let candidate_info = original_candidate.unwrap_or(candidate_rev);
+
+    // SELFCI_MERGED_* is only set in MQ mode (when original_candidate is Some)
+    let (merged_commit_id, merged_change_id) = if original_candidate.is_some() {
+        (
+            Some(candidate_rev.commit_id.to_string()),
+            Some(candidate_rev.change_id.to_string()),
+        )
+    } else {
+        (None, None)
+    };
+
     let spawn_context = super::worker::JobSpawnContext {
         base_dir: base_workdir.path().to_path_buf(),
         candidate_dir: candidate_workdir.path().to_path_buf(),
@@ -245,9 +281,11 @@ pub fn run_candidate_check(
         command: config.job.command.clone(),
         print_output: mode.print_output(),
         socket_path: socket_path.clone(),
-        candidate_commit_id: candidate_rev.commit_id.to_string(),
-        candidate_change_id: candidate_rev.change_id.to_string(),
-        candidate_id: candidate_rev.user.to_string(),
+        candidate_commit_id: candidate_info.commit_id.to_string(),
+        candidate_change_id: candidate_info.change_id.to_string(),
+        candidate_id: candidate_info.user.to_string(),
+        merged_commit_id: merged_commit_id.clone(),
+        merged_change_id: merged_change_id.clone(),
     };
     std::thread::spawn(move || {
         super::worker::control_socket_listener(
@@ -278,9 +316,11 @@ pub fn run_candidate_check(
             job_full_command: full_command,
             print_output: mode.print_output(),
             socket_path: socket_path.clone(),
-            candidate_commit_id: candidate_rev.commit_id.to_string(),
-            candidate_change_id: candidate_rev.change_id.to_string(),
-            candidate_id: candidate_rev.user.to_string(),
+            candidate_commit_id: candidate_info.commit_id.to_string(),
+            candidate_change_id: candidate_info.change_id.to_string(),
+            candidate_id: candidate_info.user.to_string(),
+            merged_commit_id,
+            merged_change_id,
         };
 
         jobs_sender.send(job).map_err(|_| CheckError::CheckFailed)?;
@@ -579,6 +619,7 @@ pub fn check(
 
     // Run the candidate check using shared implementation
     // Note: post-clone hooks are only for MQ, not inline checks
+    // Note: original_candidate is None because there's no test merge in regular check mode
     let result = run_candidate_check(
         &root_dir,
         &resolved_base,
@@ -587,6 +628,7 @@ pub fn check(
         forced_vcs,
         CheckMode::Inline { print_output },
         None, // No post-clone hook for inline checks
+        None, // No original candidate (no test merge in regular check mode)
     )?;
 
     // Print total time

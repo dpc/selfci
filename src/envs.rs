@@ -27,6 +27,12 @@ pub const SELFCI_CANDIDATE_CHANGE_ID: &str = "SELFCI_CANDIDATE_CHANGE_ID";
 /// Candidate ID (the user-provided identifier, e.g., branch name or commit reference)
 pub const SELFCI_CANDIDATE_ID: &str = "SELFCI_CANDIDATE_ID";
 
+/// Merged commit ID (MQ only: the commit hash after test merge/rebase onto base)
+pub const SELFCI_MERGED_COMMIT_ID: &str = "SELFCI_MERGED_COMMIT_ID";
+
+/// Merged change ID (MQ only: jj change ID after test merge/rebase, same as commit ID for git)
+pub const SELFCI_MERGED_CHANGE_ID: &str = "SELFCI_MERGED_CHANGE_ID";
+
 /// MQ base branch name
 pub const SELFCI_MQ_BASE_BRANCH: &str = "SELFCI_MQ_BASE_BRANCH";
 

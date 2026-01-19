@@ -37,9 +37,25 @@ The following environment variables are available to job commands:
 | `SELFCI_JOB_SOCK_PATH` | Path to the job control socket for step logging |
 | `SELFCI_BASE_DIR` | Path to the base worktree |
 | `SELFCI_CANDIDATE_DIR` | Path to the candidate worktree |
-| `SELFCI_CANDIDATE_COMMIT_ID` | Git/jj commit hash of the candidate |
-| `SELFCI_CANDIDATE_CHANGE_ID` | Jujutsu change ID (same as commit ID for git) |
+| `SELFCI_CANDIDATE_COMMIT_ID` | Git/jj commit hash of the original candidate (what user submitted) |
+| `SELFCI_CANDIDATE_CHANGE_ID` | Jujutsu change ID of the original candidate (same as commit ID for git) |
 | `SELFCI_CANDIDATE_ID` | User-provided revision string (e.g., "HEAD", branch name) |
+
+### MQ Mode Only
+
+When running via the merge queue (`selfci mq`), CI tests a merged/rebased commit rather than the original candidate. Additional environment variables are provided:
+
+| Variable | Description |
+|----------|-------------|
+| `SELFCI_MERGED_COMMIT_ID` | Git/jj commit hash after test merge/rebase onto base |
+| `SELFCI_MERGED_CHANGE_ID` | Jujutsu change ID after test merge/rebase (same as commit ID for git) |
+
+**Note:** `SELFCI_CANDIDATE_*` always refers to the original commit submitted by the user.
+`SELFCI_MERGED_*` refers to the test-merged commit that CI is actually testing. This allows jobs to:
+- Reference the original candidate for display/logging purposes
+- Know what commit hash the test worktree actually contains
+
+In regular `selfci check` mode, `SELFCI_MERGED_*` is not set.
 
 ## Steps
 

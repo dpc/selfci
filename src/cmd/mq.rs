@@ -832,10 +832,18 @@ struct HookResult {
 
 /// Environment variables for candidate-specific hooks
 struct CandidateHookEnv<'a> {
+    /// Original candidate commit ID (what user submitted)
     candidate_commit_id: &'a str,
+    /// Original candidate change ID (what user submitted)
     candidate_change_id: &'a str,
+    /// Original candidate ID (user-provided revision string)
     candidate_id: &'a str,
+    /// Base branch name
     base_branch: &'a str,
+    /// Merged commit ID (after test merge/rebase), None before test merge
+    merged_commit_id: Option<&'a str>,
+    /// Merged change ID (after test merge/rebase), None before test merge
+    merged_change_id: Option<&'a str>,
 }
 
 /// Run a hook command if configured and capture output
@@ -883,6 +891,14 @@ fn run_hook_with_env(
             .env(envs::SELFCI_CANDIDATE_CHANGE_ID, env.candidate_change_id)
             .env(envs::SELFCI_CANDIDATE_ID, env.candidate_id)
             .env(envs::SELFCI_MQ_BASE_BRANCH, env.base_branch);
+
+        // Add merged env vars if present (after test merge)
+        if let Some(merged_commit_id) = env.merged_commit_id {
+            command = command.env(envs::SELFCI_MERGED_COMMIT_ID, merged_commit_id);
+        }
+        if let Some(merged_change_id) = env.merged_change_id {
+            command = command.env(envs::SELFCI_MERGED_CHANGE_ID, merged_change_id);
+        }
     }
 
     // Use stdout_capture() to capture output instead of inheriting parent's stdout
@@ -1007,23 +1023,26 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
         // Get base branch
         let base_branch = state.base_branch();
 
-        // Create candidate environment for hooks
+        // Create candidate environment for hooks (before test merge, no merged info yet)
         let candidate_commit_id = job_info.candidate.commit_id.to_string();
         let candidate_change_id = job_info.candidate.change_id.to_string();
         let candidate_id = job_info.candidate.user.to_string();
-        let candidate_env = CandidateHookEnv {
+        let candidate_env_pre_merge = CandidateHookEnv {
             candidate_commit_id: &candidate_commit_id,
             candidate_change_id: &candidate_change_id,
             candidate_id: &candidate_id,
             base_branch: &base_branch,
+            merged_commit_id: None,
+            merged_change_id: None,
         };
 
         // Run pre-clone hook if configured (runs before worktrees are created)
+        // Uses pre-merge env (no merged info yet)
         let pre_clone_result = run_hook_with_env(
             hooks.pre_clone.as_ref(),
             "pre-clone",
             &root_dir,
-            Some(&candidate_env),
+            Some(&candidate_env_pre_merge),
         );
         if !pre_clone_result.output.is_empty() {
             job_info.output.push_str("### Pre-Clone Hook\n\n");
@@ -1079,6 +1098,16 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
         let merged_commit_id = test_merge_result.commit_id.to_string();
         let merged_change_id = test_merge_result.change_id.to_string();
 
+        // Create candidate environment with merged info for post-merge hooks
+        let candidate_env_post_merge = CandidateHookEnv {
+            candidate_commit_id: &candidate_commit_id,
+            candidate_change_id: &candidate_change_id,
+            candidate_id: &candidate_id,
+            base_branch: &base_branch,
+            merged_commit_id: Some(&merged_commit_id),
+            merged_change_id: Some(&merged_change_id),
+        };
+
         // Set up cleanup guard for jj test merge commits
         // This ensures cleanup happens regardless of check success/failure
         let _jj_cleanup_guard = if matches!(vcs, selfci::VCS::Jujutsu) {
@@ -1104,21 +1133,25 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
             .unwrap_or(1);
 
         // Build post-clone hook config if hook is configured
-        // Use merged commit info since that's what CI will test
+        // SELFCI_CANDIDATE_* = original candidate (what user submitted)
+        // SELFCI_MERGED_* = merged commit (what CI will test)
         let post_clone_hook =
             hooks
                 .post_clone
                 .as_ref()
                 .map(|hook| super::check::PostCloneHookConfig {
                     hook,
-                    candidate_commit_id: &merged_commit_id,
-                    candidate_change_id: &merged_change_id,
+                    candidate_commit_id: &candidate_commit_id,
+                    candidate_change_id: &candidate_change_id,
                     candidate_id: &candidate_id,
                     base_branch: &base_branch,
+                    merged_commit_id: Some(&merged_commit_id),
+                    merged_change_id: Some(&merged_change_id),
                 });
 
         // Run the candidate check using the shared implementation
-        // Pass the merged commit as the candidate - this is what CI will actually test
+        // Pass the merged commit as the working candidate (what CI will test)
+        // Pass the original candidate so SELFCI_CANDIDATE_* env vars refer to what user submitted
         match super::check::run_candidate_check(
             &root_dir,
             &resolved_base,
@@ -1127,6 +1160,7 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
             None,
             super::check::CheckMode::MergeQueue,
             post_clone_hook,
+            Some(&job_info.candidate), // Original candidate for SELFCI_CANDIDATE_* env vars
         ) {
             Ok(result) => {
                 // Handle post-clone hook output if present
@@ -1186,11 +1220,12 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                         );
 
                         // Run pre-merge hook if configured
+                        // Uses post-merge env (has merged info)
                         let pre_merge_result = run_hook_with_env(
                             hooks.pre_merge.as_ref(),
                             "pre-merge",
                             &root_dir,
-                            Some(&candidate_env),
+                            Some(&candidate_env_post_merge),
                         );
                         if !pre_merge_result.output.is_empty() {
                             job_info.output.push_str("\n\n### Pre-Merge Hook\n\n");
@@ -1220,11 +1255,12 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                                     job_info.output.push_str(&merge_log);
 
                                     // Run post-merge hook if configured
+                                    // Uses post-merge env (has merged info)
                                     let post_merge_result = run_hook_with_env(
                                         hooks.post_merge.as_ref(),
                                         "post-merge",
                                         &root_dir,
-                                        Some(&candidate_env),
+                                        Some(&candidate_env_post_merge),
                                     );
                                     if !post_merge_result.output.is_empty() {
                                         job_info.output.push_str("\n\n### Post-Merge Hook\n\n");

@@ -17,12 +17,16 @@ pub struct RunJobRequest {
     pub job_full_command: Vec<String>,
     pub print_output: bool,
     pub socket_path: PathBuf,
-    /// Candidate commit ID (git/jj commit hash)
+    /// Candidate commit ID (original user-submitted commit hash)
     pub candidate_commit_id: String,
-    /// Candidate change ID (jj change ID, may be empty for git)
+    /// Candidate change ID (original jj change ID, may be empty for git)
     pub candidate_change_id: String,
     /// Candidate ID (user-provided identifier)
     pub candidate_id: String,
+    /// Merged commit ID (MQ only: commit hash after test merge/rebase onto base)
+    pub merged_commit_id: Option<String>,
+    /// Merged change ID (MQ only: jj change ID after test merge/rebase)
+    pub merged_change_id: Option<String>,
 }
 
 pub struct RunJobOutcome {
@@ -108,7 +112,7 @@ pub fn job_worker(
         let start_time = Instant::now();
 
         // Execute the job command
-        let handle = match cmd(&job.job_full_command[0], &job.job_full_command[1..])
+        let mut command = cmd(&job.job_full_command[0], &job.job_full_command[1..])
             .dir(&job.candidate_dir)
             .env(envs::SELFCI_VERSION, env!("CARGO_PKG_VERSION"))
             .env(envs::SELFCI_BASE_DIR, &job.base_dir)
@@ -117,11 +121,17 @@ pub fn job_worker(
             .env(envs::SELFCI_CANDIDATE_CHANGE_ID, &job.candidate_change_id)
             .env(envs::SELFCI_CANDIDATE_ID, &job.candidate_id)
             .env(envs::SELFCI_JOB_NAME, &job.job_name)
-            .env(envs::SELFCI_JOB_SOCK_PATH, &job.socket_path)
-            .stderr_to_stdout()
-            .unchecked()
-            .reader()
-        {
+            .env(envs::SELFCI_JOB_SOCK_PATH, &job.socket_path);
+
+        // Add merged env vars if present (MQ mode only)
+        if let Some(ref merged_commit_id) = job.merged_commit_id {
+            command = command.env(envs::SELFCI_MERGED_COMMIT_ID, merged_commit_id);
+        }
+        if let Some(ref merged_change_id) = job.merged_change_id {
+            command = command.env(envs::SELFCI_MERGED_CHANGE_ID, merged_change_id);
+        }
+
+        let handle = match command.stderr_to_stdout().unchecked().reader() {
             Ok(h) => h,
             Err(e) => {
                 let outcome = RunJobOutcome {
@@ -183,12 +193,16 @@ pub struct JobSpawnContext {
     pub command: String,
     pub print_output: bool,
     pub socket_path: PathBuf,
-    /// Candidate commit ID (git/jj commit hash)
+    /// Candidate commit ID (original user-submitted commit hash)
     pub candidate_commit_id: String,
-    /// Candidate change ID (jj change ID, may be empty for git)
+    /// Candidate change ID (original jj change ID, may be empty for git)
     pub candidate_change_id: String,
     /// Candidate ID (user-provided identifier)
     pub candidate_id: String,
+    /// Merged commit ID (MQ only: commit hash after test merge/rebase)
+    pub merged_commit_id: Option<String>,
+    /// Merged change ID (MQ only: jj change ID after test merge/rebase)
+    pub merged_change_id: Option<String>,
 }
 
 /// Control socket listener - handles step logging and job control
@@ -289,6 +303,12 @@ pub fn control_socket_listener(
                                             .candidate_change_id
                                             .clone(),
                                         candidate_id: spawn_context_clone.candidate_id.clone(),
+                                        merged_commit_id: spawn_context_clone
+                                            .merged_commit_id
+                                            .clone(),
+                                        merged_change_id: spawn_context_clone
+                                            .merged_change_id
+                                            .clone(),
                                     };
 
                                     match jobs_sender_clone.send(job_request) {

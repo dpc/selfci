@@ -91,10 +91,22 @@ No candidate-specific environment variables are set since these run once at daem
 
 | Variable | Description |
 |----------|-------------|
-| `SELFCI_CANDIDATE_COMMIT_ID` | Git/jj commit hash of the candidate |
-| `SELFCI_CANDIDATE_CHANGE_ID` | Jujutsu change ID (same as commit ID for git) |
+| `SELFCI_CANDIDATE_COMMIT_ID` | Git/jj commit hash of the original candidate (what user submitted) |
+| `SELFCI_CANDIDATE_CHANGE_ID` | Jujutsu change ID of the original candidate (same as commit ID for git) |
 | `SELFCI_CANDIDATE_ID` | User-provided revision string |
 | `SELFCI_MQ_BASE_BRANCH` | Base branch for the merge queue (e.g., "main") |
+
+### post-clone, pre-merge, post-merge Only
+
+These hooks run after the test merge/rebase, so they also have access to the merged commit info:
+
+| Variable | Description |
+|----------|-------------|
+| `SELFCI_MERGED_COMMIT_ID` | Git/jj commit hash after test merge/rebase onto base |
+| `SELFCI_MERGED_CHANGE_ID` | Jujutsu change ID after test merge/rebase (same as commit ID for git) |
+
+**Note:** `SELFCI_CANDIDATE_*` always refers to the original commit submitted by the user.
+`SELFCI_MERGED_*` refers to the test-merged commit that CI is actually testing.
 
 ### post-clone Only
 

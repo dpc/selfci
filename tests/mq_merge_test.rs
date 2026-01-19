@@ -61,14 +61,18 @@ fn setup_git_mq_repo(merge_style: &str) -> tempfile::TempDir {
         .unwrap();
 
     // Create config with merge style
-    // CI command writes SELFCI_CANDIDATE_COMMIT_ID to .tested_commit_id so we can verify it changed
+    // CI command writes env vars to files so we can verify:
+    // - SELFCI_CANDIDATE_COMMIT_ID should be the same as original (what user submitted)
+    // - SELFCI_MERGED_COMMIT_ID should be different (what CI tests)
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
-    let commit_id_file = repo_path.join(".tested_commit_id");
+    let candidate_id_file = repo_path.join(".tested_candidate_id");
+    let merged_id_file = repo_path.join(".tested_merged_id");
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {}'\nmq:\n  base-branch: main\n  merge-style: {}\n",
-            commit_id_file.display(),
+            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {} && echo $SELFCI_MERGED_COMMIT_ID > {}'\nmq:\n  base-branch: main\n  merge-style: {}\n",
+            candidate_id_file.display(),
+            merged_id_file.display(),
             merge_style
         ),
     )
@@ -188,14 +192,18 @@ fn setup_jj_mq_repo(merge_style: &str) -> tempfile::TempDir {
     cmd!("jj", "git", "init").dir(repo_path).run().unwrap();
 
     // Create config with merge style
-    // CI command writes SELFCI_CANDIDATE_COMMIT_ID to .tested_commit_id so we can verify it changed
+    // CI command writes env vars to files so we can verify:
+    // - SELFCI_CANDIDATE_COMMIT_ID should be the same as original (what user submitted)
+    // - SELFCI_MERGED_COMMIT_ID should be different (what CI tests)
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
-    let commit_id_file = repo_path.join(".tested_commit_id");
+    let candidate_id_file = repo_path.join(".tested_candidate_id");
+    let merged_id_file = repo_path.join(".tested_merged_id");
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {}'\nmq:\n  base-branch: main\n  merge-style: {}\n",
-            commit_id_file.display(),
+            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {} && echo $SELFCI_MERGED_COMMIT_ID > {}'\nmq:\n  base-branch: main\n  merge-style: {}\n",
+            candidate_id_file.display(),
+            merged_id_file.display(),
             merge_style
         ),
     )
@@ -508,8 +516,9 @@ fn verify_merge_succeeded_git(repo_path: &Path, merge_style: &str) {
     }
 }
 
-/// Verify that the commit ID tested by CI differs from the original candidate
-/// This ensures the test merge/rebase actually happened before running CI
+/// Verify the env vars passed to CI:
+/// - SELFCI_CANDIDATE_COMMIT_ID should match the original (user-submitted) candidate
+/// - SELFCI_MERGED_COMMIT_ID should differ (the test merge/rebase result)
 fn verify_tested_commit_differs_from_original(repo_path: &Path) {
     // Read original feature commit
     let original_commit = fs::read_to_string(repo_path.join(".feature_commit"))
@@ -517,29 +526,58 @@ fn verify_tested_commit_differs_from_original(repo_path: &Path) {
         .trim()
         .to_string();
 
-    // Read the commit ID that was passed to CI (written by CI command)
-    let tested_commit = fs::read_to_string(repo_path.join(".tested_commit_id"))
-        .expect("Failed to read .tested_commit_id - CI command may not have run")
+    // Read the SELFCI_CANDIDATE_COMMIT_ID that was passed to CI
+    let candidate_commit = fs::read_to_string(repo_path.join(".tested_candidate_id"))
+        .expect("Failed to read .tested_candidate_id - CI command may not have run")
+        .trim()
+        .to_string();
+
+    // Read the SELFCI_MERGED_COMMIT_ID that was passed to CI
+    let merged_commit = fs::read_to_string(repo_path.join(".tested_merged_id"))
+        .expect("Failed to read .tested_merged_id - CI command may not have run")
         .trim()
         .to_string();
 
     assert!(
-        !tested_commit.is_empty(),
-        "Tested commit ID is empty - CI command may not have run correctly"
+        !candidate_commit.is_empty(),
+        "SELFCI_CANDIDATE_COMMIT_ID is empty - CI command may not have run correctly"
     );
 
-    assert_ne!(
-        original_commit, tested_commit,
-        "SELFCI_CANDIDATE_COMMIT_ID should differ from original candidate commit!\n\
+    assert!(
+        !merged_commit.is_empty(),
+        "SELFCI_MERGED_COMMIT_ID is empty - CI command may not have run correctly"
+    );
+
+    // SELFCI_CANDIDATE_COMMIT_ID should be the SAME as original (what user submitted)
+    assert_eq!(
+        original_commit, candidate_commit,
+        "SELFCI_CANDIDATE_COMMIT_ID should match the original candidate commit!\n\
          Original: {}\n\
-         Tested:   {}\n\
+         SELFCI_CANDIDATE_COMMIT_ID: {}\n\
+         This env var should refer to what the user submitted.",
+        original_commit, candidate_commit
+    );
+
+    // SELFCI_MERGED_COMMIT_ID should be DIFFERENT from original (test merge/rebase result)
+    assert_ne!(
+        original_commit, merged_commit,
+        "SELFCI_MERGED_COMMIT_ID should differ from original candidate commit!\n\
+         Original: {}\n\
+         SELFCI_MERGED_COMMIT_ID: {}\n\
          This means the test merge/rebase didn't happen before running CI.",
-        original_commit, tested_commit
+        original_commit, merged_commit
     );
 
     eprintln!("\n=== Commit ID verification ===");
     eprintln!("Original candidate commit: {}", original_commit);
-    eprintln!("Tested commit (after merge/rebase): {}", tested_commit);
+    eprintln!(
+        "SELFCI_CANDIDATE_COMMIT_ID: {} (should match original)",
+        candidate_commit
+    );
+    eprintln!(
+        "SELFCI_MERGED_COMMIT_ID: {} (should differ - test merge result)",
+        merged_commit
+    );
 }
 
 /// Verify that main bookmark has the feature commits
