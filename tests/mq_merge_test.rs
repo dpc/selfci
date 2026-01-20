@@ -1,6 +1,7 @@
 mod common;
 
 use duct::cmd;
+use selfci::constants;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -1034,15 +1035,15 @@ fn test_mq_explicit_runtime_dir() {
         "explicit runtime dir should be created"
     );
     assert!(
-        runtime_dir.join("mq.sock").exists(),
+        runtime_dir.join(constants::MQ_SOCK_FILENAME).exists(),
         "socket should exist in explicit runtime dir"
     );
     assert!(
-        runtime_dir.join("mq.pid").exists(),
+        runtime_dir.join(constants::MQ_PID_FILENAME).exists(),
         "pid file should exist in explicit runtime dir"
     );
     assert!(
-        runtime_dir.join("mq.dir").exists(),
+        runtime_dir.join(constants::MQ_DIR_FILENAME).exists(),
         "dir file should exist in explicit runtime dir"
     );
 
@@ -1138,7 +1139,7 @@ fn test_mq_explicit_runtime_dir() {
 
     // Verify daemon stopped - runtime dir should be cleaned up
     assert!(
-        !runtime_dir.join("mq.sock").exists(),
+        !runtime_dir.join(constants::MQ_SOCK_FILENAME).exists(),
         "socket should be removed after stop"
     );
 

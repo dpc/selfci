@@ -2,7 +2,7 @@ use duct::cmd;
 use nix::sys::signal::{self, Signal};
 use nix::sys::stat::{Mode, umask};
 use nix::unistd::{ForkResult, Pid, close, dup2, fork, setsid};
-use selfci::{MainError, WorkDirError, envs, get_vcs, mq_protocol, protocol};
+use selfci::{MainError, WorkDirError, constants, envs, get_vcs, mq_protocol, protocol};
 use signal_hook::consts::SIGTERM;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -48,7 +48,7 @@ fn get_project_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>
         let dir = PathBuf::from(explicit_dir);
 
         // Verify it's for our project (if initialized)
-        let dir_file = dir.join("mq.dir");
+        let dir_file = dir.join(constants::MQ_DIR_FILENAME);
         if dir_file.exists() {
             let stored_root =
                 std::fs::read_to_string(&dir_file).map_err(WorkDirError::CreateFailed)?;
@@ -74,7 +74,7 @@ fn get_project_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>
         let pid_dir = entry.path();
 
         // Read mq.dir to check project match
-        let dir_file = pid_dir.join("mq.dir");
+        let dir_file = pid_dir.join(constants::MQ_DIR_FILENAME);
         let stored_root = match std::fs::read_to_string(&dir_file) {
             Ok(s) => s,
             Err(_) => continue,
@@ -96,7 +96,7 @@ fn get_project_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>
 
 /// Verify a daemon is actually running in the given directory
 fn verify_daemon_running(daemon_dir: &Path) -> bool {
-    let socket_path = daemon_dir.join("mq.sock");
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     // If daemon responds to Hello, it's running
     matches!(
@@ -284,7 +284,7 @@ enum DaemonizeOutcome {
 /// Check if a daemon is already running for this project and print info if so
 fn check_daemon_already_running(root_dir: &Path) -> Result<bool, MainError> {
     if let Some(existing_dir) = get_project_daemon_runtime_dir(root_dir)?
-        && let Ok(pid_str) = std::fs::read_to_string(existing_dir.join("mq.pid"))
+        && let Ok(pid_str) = std::fs::read_to_string(existing_dir.join(constants::MQ_PID_FILENAME))
         && let Ok(pid) = pid_str.trim().parse::<u32>()
     {
         println!("Merge queue daemon is already running (PID: {})", pid);
@@ -327,12 +327,12 @@ fn daemonize_background(
 
     // Bind socket BEFORE writing mq.dir - this ensures that finding mq.dir
     // guarantees the socket is ready for connections
-    let socket_path = daemon_dir.join("mq.sock");
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
     let listener = UnixListener::bind(&socket_path).map_err(WorkDirError::CreateFailed)?;
 
     // Write mq.dir AFTER socket is bound - discovery via mq.dir means socket is ready
     std::fs::write(
-        daemon_dir.join("mq.dir"),
+        daemon_dir.join(constants::MQ_DIR_FILENAME),
         root_dir.to_string_lossy().as_bytes(),
     )
     .map_err(WorkDirError::CreateFailed)?;
@@ -385,7 +385,7 @@ fn daemonize_background(
             // Write mq.pid AFTER fork (child's actual PID)
             // Note: mq.dir was already written before fork for immediate discovery
             let pid = std::process::id();
-            std::fs::write(daemon_dir.join("mq.pid"), pid.to_string())
+            std::fs::write(daemon_dir.join(constants::MQ_PID_FILENAME), pid.to_string())
                 .map_err(WorkDirError::CreateFailed)?;
 
             // Set up log file redirection
@@ -443,16 +443,16 @@ fn daemonize_foreground(
     std::fs::create_dir_all(&daemon_dir).map_err(WorkDirError::CreateFailed)?;
 
     // Bind socket BEFORE writing mq.dir - finding mq.dir guarantees socket is ready
-    let socket_path = daemon_dir.join("mq.sock");
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
     let listener = UnixListener::bind(&socket_path).map_err(WorkDirError::CreateFailed)?;
 
     // Write mq.dir and mq.pid AFTER socket is bound
     std::fs::write(
-        daemon_dir.join("mq.dir"),
+        daemon_dir.join(constants::MQ_DIR_FILENAME),
         root_dir.to_string_lossy().as_bytes(),
     )
     .map_err(WorkDirError::CreateFailed)?;
-    std::fs::write(daemon_dir.join("mq.pid"), pid.to_string())
+    std::fs::write(daemon_dir.join(constants::MQ_PID_FILENAME), pid.to_string())
         .map_err(WorkDirError::CreateFailed)?;
 
     println!(
@@ -667,7 +667,7 @@ fn run_daemon_loop(
     });
 
     // Socket is already bound (passed as parameter)
-    let socket_path = daemon_dir.join("mq.sock");
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     // Set up signal handling using signal_hook's iterator API
     // This is more robust than the low-level pipe API
@@ -2119,7 +2119,7 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
         }
     };
 
-    let socket_path = daemon_dir.join("mq.sock");
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     let response = mq_protocol::send_mq_request(
         &socket_path,
@@ -2164,7 +2164,7 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
         MainError::CheckFailed
     })?;
 
-    let socket_path = daemon_dir.join("mq.sock");
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     let response =
         mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::List { limit })
@@ -2224,7 +2224,7 @@ pub fn get_status(job_id: u64) -> Result<(), MainError> {
         MainError::CheckFailed
     })?;
 
-    let socket_path = daemon_dir.join("mq.sock");
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     let response =
         mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::GetStatus { job_id })
@@ -2291,7 +2291,7 @@ pub fn stop_daemon() -> Result<(), MainError> {
         MainError::CheckFailed
     })?;
 
-    let pid_file = daemon_dir.join("mq.pid");
+    let pid_file = daemon_dir.join(constants::MQ_PID_FILENAME);
 
     // Read PID
     let pid = match std::fs::read_to_string(&pid_file) {
@@ -2382,7 +2382,7 @@ pub fn print_pid() -> Result<(), MainError> {
 
     match get_project_daemon_runtime_dir(&root_dir)? {
         Some(daemon_dir) => {
-            let pid_file = daemon_dir.join("mq.pid");
+            let pid_file = daemon_dir.join(constants::MQ_PID_FILENAME);
             let pid = std::fs::read_to_string(&pid_file).map_err(WorkDirError::CreateFailed)?;
             println!("{}", pid.trim());
             Ok(())
