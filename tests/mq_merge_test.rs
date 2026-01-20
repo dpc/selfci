@@ -94,8 +94,12 @@ fn setup_git_base_repo(merge_style: &str) -> tempfile::TempDir {
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'true'\nmq:\n  base-branch: main\n  merge-style: {}\n",
-            merge_style
+            r#"job:
+  command: 'true'
+mq:
+  base-branch: main
+  merge-style: {merge_style}
+"#
         ),
     )
     .unwrap();
@@ -209,8 +213,12 @@ fn setup_jj_base_repo(merge_style: &str) -> (tempfile::TempDir, std::path::PathB
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'true'\nmq:\n  base-branch: main\n  merge-style: {}\n",
-            merge_style
+            r#"job:
+  command: 'true'
+mq:
+  base-branch: main
+  merge-style: {merge_style}
+"#
         ),
     )
     .unwrap();

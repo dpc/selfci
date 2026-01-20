@@ -1,5 +1,6 @@
 mod common;
 
+use common::parse_selfci_env_file;
 use duct::cmd;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -893,6 +894,12 @@ fn test_hook_env_vars() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
 
+    // Create output directory for env dumps
+    let env_output_dir = repo_path.join(".env_output");
+    fs::create_dir_all(&env_output_dir).unwrap();
+    let pre_clone_env = env_output_dir.join("pre_clone.env");
+    let post_merge_env = env_output_dir.join("post_merge.env");
+
     // Initialize git repo
     cmd!("git", "init").dir(repo_path).run().unwrap();
     cmd!("git", "config", "user.name", "Test User")
@@ -906,26 +913,24 @@ fn test_hook_env_vars() {
 
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
 
-    // Create ci.yaml with hooks that output env vars
+    // Create ci.yaml with hooks that dump env vars to files
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
-        r#"job:
+        format!(
+            r#"job:
   command: 'true'
 
 mq:
   base-branch: main
   merge-style: merge
   pre-clone:
-    command: |
-      echo "PRE_CLONE_COMMIT_ID=$SELFCI_CANDIDATE_COMMIT_ID"
-      echo "PRE_CLONE_CHANGE_ID=$SELFCI_CANDIDATE_CHANGE_ID"
-      echo "PRE_CLONE_CANDIDATE_ID=$SELFCI_CANDIDATE_ID"
-      echo "PRE_CLONE_BASE_BRANCH=$SELFCI_MQ_BASE_BRANCH"
+    command: 'env > {pre_clone}'
   post-merge:
-    command: |
-      echo "POST_MERGE_COMMIT_ID=$SELFCI_CANDIDATE_COMMIT_ID"
-      echo "POST_MERGE_BASE_BRANCH=$SELFCI_MQ_BASE_BRANCH"
+    command: 'env > {post_merge}'
 "#,
+            pre_clone = pre_clone_env.display(),
+            post_merge = post_merge_env.display(),
+        ),
     )
     .unwrap();
 
@@ -998,8 +1003,6 @@ mq:
         .run()
         .unwrap();
 
-    eprintln!("\n=== Status output (env vars test) ===\n{}", status_output);
-
     // Verify job passed
     assert!(
         status_output.contains("Status: Passed"),
@@ -1007,60 +1010,58 @@ mq:
         status_output
     );
 
-    // Verify pre-clone hook received the candidate commit ID
-    let pre_clone_commit_line = status_output
-        .lines()
-        .find(|l| l.starts_with("PRE_CLONE_COMMIT_ID="));
+    // Parse env vars from hook output files
+    let pre_clone_vars = parse_selfci_env_file(&pre_clone_env);
+    let post_merge_vars = parse_selfci_env_file(&post_merge_env);
+
+    eprintln!("\n=== pre-clone env vars ===\n{:#?}", pre_clone_vars);
+    eprintln!("\n=== post-merge env vars ===\n{:#?}", post_merge_vars);
+
+    // Verify pre-clone hook env vars
     assert!(
-        pre_clone_commit_line.is_some(),
-        "Should have PRE_CLONE_COMMIT_ID line in output"
+        pre_clone_vars.contains_key("SELFCI_CANDIDATE_COMMIT_ID"),
+        "pre-clone should have SELFCI_CANDIDATE_COMMIT_ID"
     );
-    let commit_id = pre_clone_commit_line
-        .unwrap()
-        .strip_prefix("PRE_CLONE_COMMIT_ID=")
-        .unwrap();
     assert!(
-        !commit_id.is_empty(),
+        !pre_clone_vars["SELFCI_CANDIDATE_COMMIT_ID"].is_empty(),
         "SELFCI_CANDIDATE_COMMIT_ID should not be empty"
     );
 
-    // Verify pre-clone hook received the candidate ID (the user-provided revision)
-    let pre_clone_candidate_line = status_output
-        .lines()
-        .find(|l| l.starts_with("PRE_CLONE_CANDIDATE_ID="));
     assert!(
-        pre_clone_candidate_line.is_some(),
-        "Should have PRE_CLONE_CANDIDATE_ID line in output"
+        pre_clone_vars.contains_key("SELFCI_CANDIDATE_ID"),
+        "pre-clone should have SELFCI_CANDIDATE_ID"
     );
-    let candidate_id = pre_clone_candidate_line
-        .unwrap()
-        .strip_prefix("PRE_CLONE_CANDIDATE_ID=")
-        .unwrap();
     assert!(
-        !candidate_id.is_empty(),
+        !pre_clone_vars["SELFCI_CANDIDATE_ID"].is_empty(),
         "SELFCI_CANDIDATE_ID should not be empty"
     );
 
-    // Verify pre-clone hook received the base branch
-    assert!(
-        status_output.contains("PRE_CLONE_BASE_BRANCH=main"),
-        "SELFCI_MQ_BASE_BRANCH should be 'main'. Output: {}",
-        status_output
+    assert_eq!(
+        pre_clone_vars.get("SELFCI_MQ_BASE_BRANCH"),
+        Some(&"main".to_string()),
+        "pre-clone SELFCI_MQ_BASE_BRANCH should be 'main'"
     );
 
-    // Verify post-merge hook also received the env vars
+    // Verify post-merge hook env vars
     assert!(
-        status_output.contains("POST_MERGE_BASE_BRANCH=main"),
-        "Post-merge hook should receive SELFCI_MQ_BASE_BRANCH. Output: {}",
-        status_output
+        post_merge_vars.contains_key("SELFCI_CANDIDATE_COMMIT_ID"),
+        "post-merge should have SELFCI_CANDIDATE_COMMIT_ID"
+    );
+    assert!(
+        !post_merge_vars["SELFCI_CANDIDATE_COMMIT_ID"].is_empty(),
+        "post-merge SELFCI_CANDIDATE_COMMIT_ID should not be empty"
     );
 
-    // Verify post-merge hook received commit ID
-    let post_merge_commit_line = status_output
-        .lines()
-        .find(|l| l.starts_with("POST_MERGE_COMMIT_ID="));
-    assert!(
-        post_merge_commit_line.is_some(),
-        "Should have POST_MERGE_COMMIT_ID line in output"
+    assert_eq!(
+        post_merge_vars.get("SELFCI_MQ_BASE_BRANCH"),
+        Some(&"main".to_string()),
+        "post-merge SELFCI_MQ_BASE_BRANCH should be 'main'"
+    );
+
+    // Both hooks should see the same candidate commit ID
+    assert_eq!(
+        pre_clone_vars.get("SELFCI_CANDIDATE_COMMIT_ID"),
+        post_merge_vars.get("SELFCI_CANDIDATE_COMMIT_ID"),
+        "pre-clone and post-merge should see the same SELFCI_CANDIDATE_COMMIT_ID"
     );
 }

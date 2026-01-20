@@ -3,9 +3,27 @@
 
 use duct::cmd;
 use selfci::constants;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+/// Parse an env file (output of `env` command) into a HashMap
+/// Only includes SELFCI_* variables
+pub fn parse_selfci_env_file(path: &Path) -> HashMap<String, String> {
+    let content = fs::read_to_string(path).unwrap_or_default();
+    content
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            if key.starts_with("SELFCI_") {
+                Some((key.to_string(), value.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
 
 /// Helper to build config path
 fn config_path(repo_path: &Path) -> PathBuf {
@@ -39,8 +57,13 @@ pub fn setup_jj_repo() -> TempDir {
 
     // Create config file
     fs::create_dir_all(config_dir(repo_path)).expect("Failed to create config dir");
-    fs::write(config_path(repo_path), "job:\n  command: echo test\n")
-        .expect("Failed to write config");
+    fs::write(
+        config_path(repo_path),
+        r#"job:
+  command: echo test
+"#,
+    )
+    .expect("Failed to write config");
 
     // Create base revision
     fs::write(repo_path.join("base.txt"), "base content").expect("Failed to write base file");
@@ -108,8 +131,13 @@ pub fn setup_git_repo() -> TempDir {
 
     // Create config file
     fs::create_dir_all(config_dir(repo_path)).expect("Failed to create config dir");
-    fs::write(config_path(repo_path), "job:\n  command: echo test\n")
-        .expect("Failed to write config");
+    fs::write(
+        config_path(repo_path),
+        r#"job:
+  command: echo test
+"#,
+    )
+    .expect("Failed to write config");
 
     // Create base revision
     fs::write(repo_path.join("base.txt"), "base content").expect("Failed to write base file");

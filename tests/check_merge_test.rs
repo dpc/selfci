@@ -1,5 +1,6 @@
 mod common;
 
+use common::parse_selfci_env_file;
 use duct::cmd;
 use std::fs;
 use std::path::Path;
@@ -29,17 +30,19 @@ fn setup_git_check_repo(merge_style: &str) -> tempfile::TempDir {
         .unwrap();
 
     // Create config with merge style
-    // CI command writes env vars to files so we can verify them
+    // CI command dumps all env vars to a file for verification
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
-    let candidate_id_file = repo_path.join(".tested_candidate_id");
-    let merged_id_file = repo_path.join(".tested_merged_id");
+    let env_file = repo_path.join(".ci_env");
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {} && echo $SELFCI_MERGED_COMMIT_ID > {}'\nmq:\n  base-branch: main\n  merge-style: {}\n",
-            candidate_id_file.display(),
-            merged_id_file.display(),
-            merge_style
+            r#"job:
+  command: 'env > {env_file}'
+mq:
+  base-branch: main
+  merge-style: {merge_style}
+"#,
+            env_file = env_file.display(),
         ),
     )
     .unwrap();
@@ -151,18 +154,21 @@ fn setup_jj_check_repo(merge_style: &str) -> tempfile::TempDir {
     .unwrap();
 
     // Create config with merge style
+    // CI command dumps all env vars to a file for verification
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
     let output_dir = repo_path.join(".ci_output");
     fs::create_dir_all(&output_dir).unwrap();
-    let candidate_id_file = output_dir.join(".tested_candidate_id");
-    let merged_id_file = output_dir.join(".tested_merged_id");
+    let env_file = output_dir.join(".ci_env");
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {} && echo $SELFCI_MERGED_COMMIT_ID > {}'\nmq:\n  base-branch: main\n  merge-style: {}\n",
-            candidate_id_file.display(),
-            merged_id_file.display(),
-            merge_style
+            r#"job:
+  command: 'env > {env_file}'
+mq:
+  base-branch: main
+  merge-style: {merge_style}
+"#,
+            env_file = env_file.display(),
         ),
     )
     .unwrap();
@@ -283,44 +289,40 @@ fn verify_env_vars(repo_path: &Path) {
         .trim()
         .to_string();
 
-    // Try to read from repo_path first (git tests), then output_dir (jj tests)
+    // Find the env file (git: repo_path/.ci_env, jj: repo_path/.ci_output/.ci_env)
     let output_dir = repo_path.join(".ci_output");
-    let candidate_id_path = if repo_path.join(".tested_candidate_id").exists() {
-        repo_path.join(".tested_candidate_id")
+    let env_file_path = if repo_path.join(".ci_env").exists() {
+        repo_path.join(".ci_env")
     } else {
-        output_dir.join(".tested_candidate_id")
-    };
-    let merged_id_path = if repo_path.join(".tested_merged_id").exists() {
-        repo_path.join(".tested_merged_id")
-    } else {
-        output_dir.join(".tested_merged_id")
+        output_dir.join(".ci_env")
     };
 
-    // Read the SELFCI_CANDIDATE_COMMIT_ID that was passed to CI
-    let candidate_commit = fs::read_to_string(&candidate_id_path)
-        .expect("Failed to read .tested_candidate_id - CI command may not have run")
-        .trim()
-        .to_string();
+    // Parse env vars from CI output
+    let env_vars = parse_selfci_env_file(&env_file_path);
 
-    // Read the SELFCI_MERGED_COMMIT_ID that was passed to CI
-    let merged_commit = fs::read_to_string(&merged_id_path)
-        .expect("Failed to read .tested_merged_id - CI command may not have run")
-        .trim()
-        .to_string();
+    eprintln!("\n=== CI env vars ===\n{:#?}", env_vars);
+
+    let candidate_commit = env_vars
+        .get("SELFCI_CANDIDATE_COMMIT_ID")
+        .expect("SELFCI_CANDIDATE_COMMIT_ID not found - CI command may not have run");
+
+    let merged_commit = env_vars
+        .get("SELFCI_MERGED_COMMIT_ID")
+        .expect("SELFCI_MERGED_COMMIT_ID not found - CI command may not have run");
 
     assert!(
         !candidate_commit.is_empty(),
-        "SELFCI_CANDIDATE_COMMIT_ID is empty - CI command may not have run correctly"
+        "SELFCI_CANDIDATE_COMMIT_ID is empty"
     );
 
     assert!(
         !merged_commit.is_empty(),
-        "SELFCI_MERGED_COMMIT_ID is empty - CI command may not have run correctly"
+        "SELFCI_MERGED_COMMIT_ID is empty"
     );
 
     // SELFCI_CANDIDATE_COMMIT_ID should be the SAME as original (what user submitted)
     assert_eq!(
-        original_commit, candidate_commit,
+        &original_commit, candidate_commit,
         "SELFCI_CANDIDATE_COMMIT_ID should match the original candidate commit!\n\
          Original: {}\n\
          SELFCI_CANDIDATE_COMMIT_ID: {}\n\
@@ -330,7 +332,7 @@ fn verify_env_vars(repo_path: &Path) {
 
     // SELFCI_MERGED_COMMIT_ID should be DIFFERENT from original (test merge/rebase result)
     assert_ne!(
-        original_commit, merged_commit,
+        &original_commit, merged_commit,
         "SELFCI_MERGED_COMMIT_ID should differ from original candidate commit!\n\
          Original: {}\n\
          SELFCI_MERGED_COMMIT_ID: {}\n\
@@ -602,16 +604,16 @@ fn test_git_check_same_base_candidate() {
         .run()
         .unwrap();
 
-    // Create config that writes env vars
+    // Create config that dumps env vars
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
-    let candidate_id_file = repo_path.join(".tested_candidate_id");
-    let merged_id_file = repo_path.join(".tested_merged_id");
+    let env_file = repo_path.join(".ci_env");
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
-            "job:\n  command: 'echo $SELFCI_CANDIDATE_COMMIT_ID > {} && echo \"$SELFCI_MERGED_COMMIT_ID\" > {}'\n",
-            candidate_id_file.display(),
-            merged_id_file.display(),
+            r#"job:
+  command: 'env > {env_file}'
+"#,
+            env_file = env_file.display(),
         ),
     )
     .unwrap();
@@ -654,22 +656,26 @@ fn test_git_check_same_base_candidate() {
         "Check should pass"
     );
 
+    // Parse env vars from CI output
+    let env_vars = parse_selfci_env_file(&env_file);
+
+    eprintln!("\n=== CI env vars ===\n{:#?}", env_vars);
+
     // SELFCI_CANDIDATE_COMMIT_ID should be set
-    let candidate_commit = fs::read_to_string(&candidate_id_file)
-        .expect("Failed to read .tested_candidate_id")
-        .trim()
-        .to_string();
+    let candidate_commit = env_vars
+        .get("SELFCI_CANDIDATE_COMMIT_ID")
+        .expect("SELFCI_CANDIDATE_COMMIT_ID not found");
 
     assert_eq!(
-        commit, candidate_commit,
+        &commit, candidate_commit,
         "SELFCI_CANDIDATE_COMMIT_ID should match the commit"
     );
 
     // SELFCI_MERGED_COMMIT_ID should be empty (no merge when base == candidate)
-    let merged_commit = fs::read_to_string(&merged_id_file)
-        .expect("Failed to read .tested_merged_id")
-        .trim()
-        .to_string();
+    let merged_commit = env_vars
+        .get("SELFCI_MERGED_COMMIT_ID")
+        .map(|s| s.as_str())
+        .unwrap_or("");
 
     assert!(
         merged_commit.is_empty(),
