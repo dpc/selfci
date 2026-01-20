@@ -273,6 +273,12 @@ fn main_inner() -> Result<(), MainError> {
             Some(opts::MQCommands::Stop) => {
                 cmd::mq::stop_daemon()?;
             }
+            Some(opts::MQCommands::RuntimeDir) => {
+                cmd::mq::print_runtime_dir()?;
+            }
+            Some(opts::MQCommands::Pid) => {
+                cmd::mq::print_pid()?;
+            }
         },
     }
 

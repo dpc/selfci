@@ -136,4 +136,8 @@ pub enum MQCommands {
     },
     /// Stop the merge queue daemon
     Stop,
+    /// Print the runtime directory for the daemon
+    RuntimeDir,
+    /// Print the PID of the running daemon
+    Pid,
 }

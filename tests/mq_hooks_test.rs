@@ -3,7 +3,7 @@ mod common;
 use common::parse_selfci_env_file;
 use duct::cmd;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -15,29 +15,28 @@ fn selfci_bin() -> String {
     format!("{}/target/{}/selfci", manifest_dir, dir)
 }
 
-/// Extract runtime directory from `mq start` output
-fn extract_runtime_dir(output: &str) -> PathBuf {
-    output
-        .lines()
-        .find(|l| l.starts_with("Runtime directory:"))
-        .map(|l| PathBuf::from(l.trim_start_matches("Runtime directory:").trim()))
-        .expect("Failed to extract runtime directory from mq start output")
-}
-
-/// Wait for daemon to be ready by polling for mq.sock
-fn wait_for_daemon_ready(runtime_dir: &Path, timeout_secs: u64) {
-    let socket_path = runtime_dir.join("mq.sock");
+/// Wait for daemon to be ready by sending a request
+/// This ensures the daemon has completed initialization (including post-start hook)
+/// since the accept loop only starts after post-start hook completes
+fn wait_for_daemon_ready(repo_path: &Path, timeout_secs: u64) {
     let start = std::time::Instant::now();
-    while !socket_path.exists() {
-        if start.elapsed().as_secs() > timeout_secs {
-            panic!(
-                "Daemon did not become ready within {} seconds (socket {} not found)",
-                timeout_secs,
-                socket_path.display()
-            );
+    while start.elapsed().as_secs() < timeout_secs {
+        // mq list will find daemon via mq.dir (written before fork) and connect to socket
+        // This blocks until daemon's accept loop is running (after post-start hook)
+        let output = cmd!(selfci_bin(), "mq", "list")
+            .dir(repo_path)
+            .unchecked()
+            .stderr_to_stdout()
+            .read();
+        if output.is_ok() {
+            return;
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(50));
     }
+    panic!(
+        "Daemon did not become ready within {} seconds",
+        timeout_secs
+    );
 }
 
 /// Helper to wait for job completion and return the status output
@@ -172,13 +171,12 @@ fn test_mq_hooks_execution() {
     let feature_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
 
     // Start MQ daemon
-    let start_output = cmd!(selfci_bin(), "mq", "start")
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
         .env("SELFCI_LOG", "debug")
-        .read()
+        .run()
         .unwrap();
-    let runtime_dir = extract_runtime_dir(&start_output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Add candidate
     let output = cmd!(selfci_bin(), "mq", "add", feature_commit.trim())
@@ -383,12 +381,11 @@ mq:
         .unwrap();
 
     // Start daemon
-    let start_output = cmd!(selfci_bin(), "mq", "start")
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
-        .read()
+        .run()
         .unwrap();
-    let runtime_dir = extract_runtime_dir(&start_output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Add candidate
     let output = cmd!(selfci_bin(), "mq", "add", &feature_commit)
@@ -514,12 +511,11 @@ mq:
         .unwrap();
 
     // Start daemon
-    let start_output = cmd!(selfci_bin(), "mq", "start")
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
-        .read()
+        .run()
         .unwrap();
-    let runtime_dir = extract_runtime_dir(&start_output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Add candidate
     let output = cmd!(selfci_bin(), "mq", "add", &feature_commit)
@@ -636,8 +632,7 @@ mq:
 
     eprintln!("\n=== Daemon start output ===\n{}", output);
 
-    let runtime_dir = extract_runtime_dir(&output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Verify marker file was created by pre-start hook
     assert!(
@@ -792,8 +787,7 @@ mq:
 
     eprintln!("\n=== Daemon start output ===\n{}", output);
 
-    let runtime_dir = extract_runtime_dir(&output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Verify marker file was created by post-start hook
     assert!(
@@ -974,12 +968,11 @@ mq:
         .unwrap();
 
     // Start daemon
-    let start_output = cmd!(selfci_bin(), "mq", "start")
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
-        .read()
+        .run()
         .unwrap();
-    let runtime_dir = extract_runtime_dir(&start_output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Add candidate
     let output = cmd!(selfci_bin(), "mq", "add", &feature_commit)

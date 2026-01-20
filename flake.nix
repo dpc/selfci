@@ -104,6 +104,9 @@
                     git
                     jujutsu
                   ];
+                  env = {
+                    NEXTEST_SHOW_PROGRESS = "none";
+                  };
                 };
 
                 clippy = craneLib.cargoClippy {

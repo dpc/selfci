@@ -15,29 +15,49 @@ fn selfci_bin() -> String {
     format!("{}/target/{}/selfci", manifest_dir, dir)
 }
 
-/// Extract runtime directory from `mq start` output
-fn extract_runtime_dir(output: &str) -> PathBuf {
-    output
-        .lines()
-        .find(|l| l.starts_with("Runtime directory:"))
-        .map(|l| PathBuf::from(l.trim_start_matches("Runtime directory:").trim()))
-        .expect("Failed to extract runtime directory from mq start output")
+/// Wait for daemon to be ready by sending a request
+/// This ensures the daemon has completed initialization (including post-start hook)
+/// since the accept loop only starts after post-start hook completes
+fn wait_for_daemon_ready(repo_path: &Path, timeout_secs: u64) {
+    let start = std::time::Instant::now();
+    while start.elapsed().as_secs() < timeout_secs {
+        // mq list will find daemon via mq.dir (written before fork) and connect to socket
+        // This blocks until daemon's accept loop is running (after initialization)
+        let output = cmd!(selfci_bin(), "mq", "list")
+            .dir(repo_path)
+            .unchecked()
+            .stderr_to_stdout()
+            .read();
+        if output.is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "Daemon did not become ready within {} seconds",
+        timeout_secs
+    );
 }
 
-/// Wait for daemon to be ready by polling for mq.sock
-fn wait_for_daemon_ready(runtime_dir: &Path, timeout_secs: u64) {
-    let socket_path = runtime_dir.join("mq.sock");
+/// Wait for daemon with explicit runtime dir (for foreground mode tests)
+fn wait_for_daemon_ready_with_env(repo_path: &Path, runtime_dir: &Path, timeout_secs: u64) {
     let start = std::time::Instant::now();
-    while !socket_path.exists() {
-        if start.elapsed().as_secs() > timeout_secs {
-            panic!(
-                "Daemon did not become ready within {} seconds (socket {} not found)",
-                timeout_secs,
-                socket_path.display()
-            );
+    while start.elapsed().as_secs() < timeout_secs {
+        let output = cmd!(selfci_bin(), "mq", "list")
+            .dir(repo_path)
+            .env("SELFCI_MQ_RUNTIME_DIR", runtime_dir)
+            .unchecked()
+            .stderr_to_stdout()
+            .read();
+        if output.is_ok() {
+            return;
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(50));
     }
+    panic!(
+        "Daemon did not become ready within {} seconds",
+        timeout_secs
+    );
 }
 
 /// Helper to wait for job completion
@@ -172,7 +192,7 @@ fn create_git_candidate(repo_path: &Path, candidate_num: usize) -> String {
 
 /// Setup a base Jujutsu repository with just main bookmark and initial commit
 /// Returns (repo_dir, test_home_path)
-fn setup_jj_base_repo(merge_style: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+fn setup_jj_base_repo(merge_style: &str) -> (tempfile::TempDir, PathBuf) {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
 
@@ -473,13 +493,12 @@ fn run_git_merge_test(merge_style: &str, num_candidates: usize) {
     }
 
     // Start MQ daemon in background
-    let start_output = cmd!(selfci_bin(), "mq", "start")
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
         .env("SELFCI_LOG", "debug")
-        .read()
+        .run()
         .unwrap();
-    let runtime_dir = extract_runtime_dir(&start_output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Add all candidates and collect job IDs
     let mut job_ids = Vec::new();
@@ -534,16 +553,15 @@ fn run_jj_merge_test(merge_style: &str, num_candidates: usize) {
     fs::write(repo_path.join("working.txt"), "working on something else").unwrap();
 
     // Start MQ daemon in background
-    let start_output = cmd!(selfci_bin(), "mq", "start")
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
         .env("HOME", &test_home)
         .env("JJ_USER", "Test User")
         .env("JJ_EMAIL", "test@example.com")
         .env("SELFCI_LOG", "debug")
-        .read()
+        .run()
         .unwrap();
-    let runtime_dir = extract_runtime_dir(&start_output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Add all candidates and collect job IDs
     let mut job_ids = Vec::new();
@@ -654,12 +672,11 @@ fn test_mq_stop_via_command() {
     let repo_path = repo.path();
 
     // Start daemon in background
-    let start_output = cmd!(selfci_bin(), "mq", "start")
+    cmd!(selfci_bin(), "mq", "start")
         .dir(repo_path)
-        .read()
+        .run()
         .unwrap();
-    let runtime_dir = extract_runtime_dir(&start_output);
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready(repo_path, 10);
 
     // Stop via command
     let start = std::time::Instant::now();
@@ -687,17 +704,18 @@ fn test_mq_stop_via_signal() {
     let repo_path = repo.path();
 
     // Start daemon in background
-    let start_output = cmd!(selfci_bin(), "mq", "start")
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    // Get daemon PID
+    let pid_str = cmd!(selfci_bin(), "mq", "pid")
         .dir(repo_path)
         .read()
         .unwrap();
-    let runtime_dir = extract_runtime_dir(&start_output);
-    wait_for_daemon_ready(&runtime_dir, 10);
-
-    // Read PID from runtime directory
-    let pid_str =
-        std::fs::read_to_string(runtime_dir.join("mq.pid")).expect("Failed to read mq.pid");
-    let pid: i32 = pid_str.trim().parse().expect("Invalid PID in mq.pid");
+    let pid: i32 = pid_str.trim().parse().expect("Invalid PID");
 
     // Send SIGTERM directly
     let start = std::time::Instant::now();
@@ -745,7 +763,7 @@ fn test_mq_stop_foreground_via_command() {
         .stderr_null()
         .start()
         .unwrap();
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready_with_env(repo_path, &runtime_dir, 10);
 
     // Stop via command (must use same runtime dir)
     let start = std::time::Instant::now();
@@ -789,7 +807,7 @@ fn test_mq_stop_foreground_via_signal() {
         .spawn()
         .expect("Failed to spawn daemon");
     let pid = child.id() as i32;
-    wait_for_daemon_ready(&runtime_dir, 10);
+    wait_for_daemon_ready_with_env(repo_path, &runtime_dir, 10);
 
     // Send SIGTERM directly
     let start = std::time::Instant::now();
@@ -821,4 +839,174 @@ fn test_mq_stop_foreground_via_signal() {
         elapsed,
         exited
     );
+}
+
+// ============================================================================
+// Daemon start and lifecycle tests
+// ============================================================================
+
+/// Test basic daemon start and helper commands (runtime-dir, pid)
+#[test]
+fn test_mq_start_and_helper_commands() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Start daemon
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    // Test runtime-dir command
+    let runtime_dir = cmd!(selfci_bin(), "mq", "runtime-dir")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    let runtime_dir = runtime_dir.trim();
+    assert!(!runtime_dir.is_empty(), "runtime-dir should return a path");
+    assert!(
+        std::path::Path::new(runtime_dir).exists(),
+        "runtime-dir path should exist"
+    );
+
+    // Test pid command
+    let pid_str = cmd!(selfci_bin(), "mq", "pid")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    let pid: u32 = pid_str.trim().parse().expect("pid should be a number");
+    assert!(pid > 0, "pid should be positive");
+
+    // Verify the daemon process exists
+    assert!(
+        std::path::Path::new(&format!("/proc/{}", pid)).exists(),
+        "daemon process should exist"
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // After stop, runtime-dir and pid should fail
+    let result = cmd!(selfci_bin(), "mq", "runtime-dir")
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        !result.status.success(),
+        "runtime-dir should fail after stop"
+    );
+
+    let result = cmd!(selfci_bin(), "mq", "pid")
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(!result.status.success(), "pid should fail after stop");
+}
+
+/// Test that starting daemon when already running is idempotent
+#[test]
+fn test_mq_start_already_running() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Start daemon first time
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    // Get initial PID
+    let pid1 = cmd!(selfci_bin(), "mq", "pid")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+
+    // Start daemon again - should be idempotent
+    let output = cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .stderr_to_stdout()
+        .read()
+        .unwrap();
+    assert!(
+        output.contains("already running"),
+        "should report daemon already running"
+    );
+
+    // PID should be the same (same daemon)
+    let pid2 = cmd!(selfci_bin(), "mq", "pid")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    assert_eq!(pid1, pid2, "daemon PID should not change");
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+}
+
+/// Test auto-start: daemon starts automatically when running `mq add` without daemon
+#[test]
+fn test_mq_auto_start() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Create a feature branch
+    cmd!("git", "checkout", "-b", "feature")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("feature.txt"), "feature").unwrap();
+    cmd!("git", "add", ".").dir(repo_path).run().unwrap();
+    cmd!("git", "commit", "-m", "Feature")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Verify daemon is not running
+    let result = cmd!(selfci_bin(), "mq", "pid")
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        !result.status.success(),
+        "daemon should not be running initially"
+    );
+
+    // Run mq add - should auto-start daemon
+    let output = cmd!(selfci_bin(), "mq", "add", "feature")
+        .dir(repo_path)
+        .stderr_to_stdout()
+        .read()
+        .unwrap();
+    assert!(
+        output.contains("Auto-starting"),
+        "should auto-start daemon: {}",
+        output
+    );
+
+    // Daemon should now be running
+    let pid = cmd!(selfci_bin(), "mq", "pid")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    assert!(
+        !pid.trim().is_empty(),
+        "daemon should be running after auto-start"
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
 }
