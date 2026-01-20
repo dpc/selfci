@@ -1010,3 +1010,144 @@ fn test_mq_auto_start() {
         .run()
         .unwrap();
 }
+
+/// Test daemon lifecycle with explicit SELFCI_MQ_RUNTIME_DIR
+#[test]
+fn test_mq_explicit_runtime_dir() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Use explicit runtime directory
+    let runtime_dir = repo_path.join(".selfci-mq-explicit");
+
+    // Start daemon with explicit runtime dir
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready_with_env(repo_path, &runtime_dir, 10);
+
+    // Verify runtime directory was created
+    assert!(
+        runtime_dir.exists(),
+        "explicit runtime dir should be created"
+    );
+    assert!(
+        runtime_dir.join("mq.sock").exists(),
+        "socket should exist in explicit runtime dir"
+    );
+    assert!(
+        runtime_dir.join("mq.pid").exists(),
+        "pid file should exist in explicit runtime dir"
+    );
+    assert!(
+        runtime_dir.join("mq.dir").exists(),
+        "dir file should exist in explicit runtime dir"
+    );
+
+    // Test runtime-dir command returns the explicit path
+    let returned_dir = cmd!(selfci_bin(), "mq", "runtime-dir")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .read()
+        .unwrap();
+    assert_eq!(
+        returned_dir.trim(),
+        runtime_dir.to_str().unwrap(),
+        "runtime-dir should return explicit path"
+    );
+
+    // Test pid command
+    let pid_str = cmd!(selfci_bin(), "mq", "pid")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .read()
+        .unwrap();
+    let pid: u32 = pid_str.trim().parse().expect("pid should be a number");
+    assert!(pid > 0, "pid should be positive");
+
+    // Test list command (should show no jobs initially)
+    let list_output = cmd!(selfci_bin(), "mq", "list")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .read()
+        .unwrap();
+    assert!(
+        list_output.contains("No jobs"),
+        "should show no jobs initially"
+    );
+
+    // Create a feature branch and add it to the queue
+    cmd!("git", "checkout", "-b", "feature")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("feature.txt"), "feature content").unwrap();
+    cmd!("git", "add", ".").dir(repo_path).run().unwrap();
+    cmd!("git", "commit", "-m", "Add feature")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Add candidate to queue
+    let add_output = cmd!(selfci_bin(), "mq", "add", "--no-merge", "feature")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .read()
+        .unwrap();
+    assert!(
+        add_output.contains("job ID: 1"),
+        "should add candidate with job ID 1: {}",
+        add_output
+    );
+
+    // Wait a moment for the job to be processed
+    thread::sleep(Duration::from_millis(500));
+
+    // Test status command
+    let status_output = cmd!(selfci_bin(), "mq", "status", "1")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .read()
+        .unwrap();
+    assert!(
+        status_output.contains("Run ID: 1"),
+        "status should show job 1: {}",
+        status_output
+    );
+
+    // List should now show the job
+    let list_output = cmd!(selfci_bin(), "mq", "list")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .read()
+        .unwrap();
+    assert!(
+        !list_output.contains("No jobs"),
+        "should show jobs after adding: {}",
+        list_output
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .run()
+        .unwrap();
+
+    // Verify daemon stopped - runtime dir should be cleaned up
+    assert!(
+        !runtime_dir.join("mq.sock").exists(),
+        "socket should be removed after stop"
+    );
+
+    // Commands should fail after stop
+    let result = cmd!(selfci_bin(), "mq", "pid")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(!result.status.success(), "pid should fail after stop");
+}
