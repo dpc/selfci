@@ -82,7 +82,7 @@ fn get_project_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>
 
         if paths_equal(Path::new(stored_root.trim()), project_root) {
             // Found matching project, verify daemon is running
-            if verify_daemon_running(&pid_dir)? {
+            if verify_daemon_running(&pid_dir) {
                 return Ok(Some(pid_dir));
             } else {
                 // Stale daemon, clean up
@@ -95,33 +95,14 @@ fn get_project_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>
 }
 
 /// Verify a daemon is actually running in the given directory
-fn verify_daemon_running(daemon_dir: &Path) -> Result<bool, MainError> {
-    let pid_file = daemon_dir.join("mq.pid");
+fn verify_daemon_running(daemon_dir: &Path) -> bool {
     let socket_path = daemon_dir.join("mq.sock");
 
-    // Read PID
-    let pid = match std::fs::read_to_string(&pid_file) {
-        Ok(content) => match content.trim().parse::<u32>() {
-            Ok(p) => p,
-            Err(_) => return Ok(false),
-        },
-        Err(_) => return Ok(false),
-    };
-
-    // Check process exists
-    if signal::kill(Pid::from_raw(pid as i32), None).is_err() {
-        return Ok(false);
-    }
-
-    // Verify socket responds
-    if socket_path.exists() {
-        match mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Hello) {
-            Ok(mq_protocol::MQResponse::HelloAck) => Ok(true),
-            _ => Ok(false),
-        }
-    } else {
-        Ok(false)
-    }
+    // If daemon responds to Hello, it's running
+    matches!(
+        mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Hello),
+        Ok(mq_protocol::MQResponse::HelloAck)
+    )
 }
 
 struct MQState {
