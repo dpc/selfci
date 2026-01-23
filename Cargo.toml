@@ -1,6 +1,6 @@
 [package]
 name = "selfci"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "SelfCI is a minimalistic local-first Unix-philosophy-abiding CI."
 license = "MPL-2.0"
