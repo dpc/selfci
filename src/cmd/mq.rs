@@ -1343,11 +1343,22 @@ fn test_merge_git_rebase(
 
     // In the worktree, rebase onto base_branch
     debug!(base = %base_branch, "Rebasing onto base branch");
-    cmd!("git", "rebase", base_branch)
+    let rebase_result = cmd!("git", "rebase", base_branch)
         .dir(&temp_worktree)
         .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
         .run()
-        .map_err(selfci::MergeError::RebaseFailed)?;
+        .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
+
+    if !rebase_result.status.success() {
+        // Abort the rebase to clean up
+        let _ = cmd!("git", "rebase", "--abort").dir(&temp_worktree).run();
+        let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
+        return Err(selfci::MergeError::RebaseFailed(
+            selfci::CommandOutputError(output),
+        ));
+    }
 
     // Get the resulting commit ID (HEAD in worktree)
     let commit_id = cmd!("git", "rev-parse", "HEAD")
@@ -1408,7 +1419,7 @@ fn test_merge_git_merge(
 
     // In the worktree, merge candidate
     debug!(candidate = %candidate.commit_id, "Merging candidate");
-    cmd!(
+    let merge_result = cmd!(
         "git",
         "merge",
         "--no-ff",
@@ -1418,8 +1429,19 @@ fn test_merge_git_merge(
     )
     .dir(&temp_worktree)
     .stderr_to_stdout()
+    .stdout_capture()
+    .unchecked()
     .run()
-    .map_err(selfci::MergeError::MergeFailed)?;
+    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+
+    if !merge_result.status.success() {
+        // Abort the merge to clean up
+        let _ = cmd!("git", "merge", "--abort").dir(&temp_worktree).run();
+        let output = String::from_utf8_lossy(&merge_result.stdout).to_string();
+        return Err(selfci::MergeError::MergeFailed(selfci::CommandOutputError(
+            output,
+        )));
+    }
 
     // Get the resulting commit ID (HEAD in worktree)
     let commit_id = cmd!("git", "rev-parse", "HEAD")
@@ -1498,7 +1520,7 @@ fn test_merge_jj_rebase(
         .dir(root_dir)
         .stderr_to_stdout()
         .read()
-        .map_err(selfci::MergeError::RebaseFailed)?;
+        .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
 
     debug!(dup_output = %dup_output, "Duplicate output");
 
@@ -1518,16 +1540,16 @@ fn test_merge_jj_rebase(
     }
 
     let dup_change_id = duplicated_tip_change_id.ok_or_else(|| {
-        selfci::MergeError::RebaseFailed(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Failed to find duplicated tip in output: {}", dup_output),
-        ))
+        selfci::MergeError::RebaseFailed(selfci::CommandOutputError(format!(
+            "Failed to find duplicated tip in output: {}",
+            dup_output
+        )))
     })?;
 
     debug!(dup_change_id = %dup_change_id, "Found duplicated tip change ID");
 
     // Rebase the duplicated commits onto base branch
-    cmd!(
+    let rebase_result = cmd!(
         "jj",
         "--ignore-working-copy",
         "rebase",
@@ -1538,8 +1560,17 @@ fn test_merge_jj_rebase(
     )
     .dir(root_dir)
     .stderr_to_stdout()
+    .stdout_capture()
+    .unchecked()
     .run()
-    .map_err(selfci::MergeError::RebaseFailed)?;
+    .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
+
+    if !rebase_result.status.success() {
+        let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
+        return Err(selfci::MergeError::RebaseFailed(
+            selfci::CommandOutputError(output),
+        ));
+    }
 
     // Get the commit ID of the rebased duplicate
     let commit_id = cmd!(
@@ -1601,7 +1632,7 @@ fn test_merge_jj_merge(
     .stdin_null()
     .stderr_to_stdout()
     .read()
-    .map_err(selfci::MergeError::MergeFailed)?;
+    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
 
     // Parse the output to get the change ID
     // Output format: "Created new commit <change_id> <short_commit_id> ..."
@@ -1609,19 +1640,19 @@ fn test_merge_jj_merge(
         .lines()
         .find(|line| line.starts_with("Created new commit"))
         .ok_or_else(|| {
-            selfci::MergeError::MergeFailed(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to parse merge commit from output: {}", output),
-            ))
+            selfci::MergeError::MergeFailed(selfci::CommandOutputError(format!(
+                "Failed to parse merge commit from output: {}",
+                output
+            )))
         })?
         .split_whitespace()
         .collect();
 
     let change_id = parts.get(3).ok_or_else(|| {
-        selfci::MergeError::MergeFailed(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Failed to parse change ID from output: {}", output),
-        ))
+        selfci::MergeError::MergeFailed(selfci::CommandOutputError(format!(
+            "Failed to parse change ID from output: {}",
+            output
+        )))
     })?;
 
     // Get the full commit ID using jj log (the output only has short ID)
@@ -1736,11 +1767,20 @@ fn merge_candidate_git_rebase(
 
     // In the worktree, rebase onto base_branch
     merge_log.push_str(&format!("Rebasing onto {}\n", base_branch));
-    let output = cmd!("git", "rebase", base_branch)
+    let rebase_result = cmd!("git", "rebase", base_branch)
         .dir(&temp_worktree)
         .stderr_to_stdout()
-        .read()
-        .map_err(selfci::MergeError::RebaseFailed)?;
+        .stdout_capture()
+        .unchecked()
+        .run()
+        .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
+    let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
+    if !rebase_result.status.success() {
+        let _ = cmd!("git", "rebase", "--abort").dir(&temp_worktree).run();
+        return Err(selfci::MergeError::RebaseFailed(
+            selfci::CommandOutputError(output),
+        ));
+    }
     merge_log.push_str(&output);
     merge_log.push('\n');
 
@@ -1818,7 +1858,7 @@ fn merge_candidate_git_merge(
         candidate.commit_id, test_output
     );
 
-    let output = cmd!(
+    let merge_result = cmd!(
         "git",
         "merge",
         "--no-ff",
@@ -1828,8 +1868,17 @@ fn merge_candidate_git_merge(
     )
     .dir(&temp_worktree)
     .stderr_to_stdout()
-    .read()
-    .map_err(selfci::MergeError::MergeFailed)?;
+    .stdout_capture()
+    .unchecked()
+    .run()
+    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+    let output = String::from_utf8_lossy(&merge_result.stdout).to_string();
+    if !merge_result.status.success() {
+        let _ = cmd!("git", "merge", "--abort").dir(&temp_worktree).run();
+        return Err(selfci::MergeError::MergeFailed(selfci::CommandOutputError(
+            output,
+        )));
+    }
     merge_log.push_str(&output);
     merge_log.push('\n');
 
@@ -1890,7 +1939,7 @@ fn merge_candidate_jj_rebase(
     // Rebase the candidate branch onto base
     // The test merge used a duplicate, so the original candidate is still untouched
     merge_log.push_str("Rebasing branch\n");
-    let output = cmd!(
+    let rebase_result = cmd!(
         "jj",
         "--ignore-working-copy",
         "rebase",
@@ -1901,8 +1950,16 @@ fn merge_candidate_jj_rebase(
     )
     .dir(root_dir)
     .stderr_to_stdout()
-    .read()
-    .map_err(selfci::MergeError::RebaseFailed)?;
+    .stdout_capture()
+    .unchecked()
+    .run()
+    .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
+    let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
+    if !rebase_result.status.success() {
+        return Err(selfci::MergeError::RebaseFailed(
+            selfci::CommandOutputError(output),
+        ));
+    }
     merge_log.push_str(&output);
     merge_log.push('\n');
 
@@ -1970,7 +2027,7 @@ fn merge_candidate_jj_merge(
     .stdin_null()
     .stderr_to_stdout()
     .read()
-    .map_err(selfci::MergeError::MergeFailed)?;
+    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
     merge_log.push_str(&output);
     merge_log.push('\n');
 
@@ -1981,10 +2038,10 @@ fn merge_candidate_jj_merge(
         .find(|line| line.starts_with("Created new commit"))
         .and_then(|line| line.split_whitespace().nth(3))
         .ok_or_else(|| {
-            selfci::MergeError::MergeFailed(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to parse merge commit ID from output: {}", output),
-            ))
+            selfci::MergeError::MergeFailed(selfci::CommandOutputError(format!(
+                "Failed to parse merge commit ID from output: {}",
+                output
+            )))
         })?
         .to_string();
     merge_log.push_str(&format!(
@@ -2010,7 +2067,7 @@ fn merge_candidate_jj_merge(
     .dir(root_dir)
     .stderr_to_stdout()
     .read()
-    .map_err(selfci::MergeError::MergeFailed)?;
+    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
     merge_log.push_str(&output);
     merge_log.push('\n');
 

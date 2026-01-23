@@ -1,5 +1,18 @@
 use error_set::error_set;
 
+/// A simple error type that wraps a string message
+/// Used for command output errors where we want to capture and display the output
+#[derive(Debug)]
+pub struct CommandOutputError(pub String);
+
+impl std::fmt::Display for CommandOutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CommandOutputError {}
+
 error_set! {
     VCSError := {
         #[display("No supported VCS found (looking for .jj or .git directory)")]
@@ -48,10 +61,10 @@ error_set! {
         ConfigParseFailed(serde_yaml::Error),
         #[display("Failed to create temporary worktree")]
         WorktreeCreateFailed(std::io::Error),
-        #[display("Failed to rebase")]
-        RebaseFailed(std::io::Error),
-        #[display("Failed to merge")]
-        MergeFailed(std::io::Error),
+        #[display("Failed to rebase:\n{0}")]
+        RebaseFailed(CommandOutputError),
+        #[display("Failed to merge:\n{0}")]
+        MergeFailed(CommandOutputError),
         #[display("Failed to update branch")]
         BranchUpdateFailed(std::io::Error),
         #[display("Failed to get change ID")]
