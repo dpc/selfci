@@ -142,7 +142,7 @@ impl MQState {
             queued_at: SystemTime::now(),
             started_at: None,
             completed_at: None,
-            merge_style: None,
+            merge_style: self.merge_style,
             test_merge_output: String::new(),
             output: String::new(),
             active_jobs: Vec::new(),
@@ -1148,8 +1148,7 @@ fn process_queue(
                 }
             };
 
-        // Store the test merge output and style in the job info
-        run_info.merge_style = Some(merge_style);
+        // Store the test merge output in the job info
         run_info.test_merge_output = test_merge_result.output.clone();
 
         // Use the merged commit for CI testing
@@ -2474,9 +2473,8 @@ pub fn get_status(run_id: u64) -> Result<(), MainError> {
 
             if !run.test_merge_output.is_empty() {
                 let header = match run.merge_style {
-                    Some(selfci::config::MergeStyle::Rebase) => "### Pre-check Rebase",
-                    Some(selfci::config::MergeStyle::Merge) => "### Pre-check Merge",
-                    None => "### Pre-check Merge/Rebase",
+                    selfci::config::MergeStyle::Rebase => "### Pre-check Rebase",
+                    selfci::config::MergeStyle::Merge => "### Pre-check Merge",
                 };
                 println!("\n{}\n", header);
                 println!("{}", run.test_merge_output);
