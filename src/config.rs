@@ -60,14 +60,14 @@ pub struct JobConfig {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum MergeStyle {
+pub enum MergeMode {
     #[default]
     Rebase,
     Merge,
 }
 
-fn default_merge_style() -> MergeStyle {
-    MergeStyle::default()
+fn default_merge_mode() -> MergeMode {
+    MergeMode::default()
 }
 
 /// MQ hooks configuration (pre_start, post_start, pre_clone, post_clone, pre_merge, post_merge)
@@ -117,8 +117,12 @@ impl MQHooksConfig {
 pub struct MQConfig {
     #[serde(rename = "base-branch")]
     pub base_branch: Option<String>,
-    #[serde(rename = "merge-style", default = "default_merge_style")]
-    pub merge_style: MergeStyle,
+    #[serde(
+        rename = "merge-mode",
+        alias = "merge-style",
+        default = "default_merge_mode"
+    )]
+    pub merge_mode: MergeMode,
     #[serde(flatten)]
     pub hooks: MQHooksConfig,
 }
@@ -142,7 +146,7 @@ pub struct LocalConfig {
 #[derive(Debug, Clone, Default)]
 pub struct MergedMQConfig {
     pub base_branch: Option<String>,
-    pub merge_style: MergeStyle,
+    pub merge_mode: MergeMode,
     pub hooks: MQHooksConfig,
 }
 
@@ -152,7 +156,7 @@ impl MergedMQConfig {
         let mut result = if let Some(mq) = main_mq {
             MergedMQConfig {
                 base_branch: mq.base_branch.clone(),
-                merge_style: mq.merge_style,
+                merge_mode: mq.merge_mode,
                 hooks: mq.hooks.clone(),
             }
         } else {

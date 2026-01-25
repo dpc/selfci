@@ -118,7 +118,7 @@ struct RunEntry {
 struct MQState {
     root_dir: PathBuf,
     base_branch: String,
-    merge_style: selfci::config::MergeStyle,
+    merge_mode: selfci::config::MergeMode,
     hooks: selfci::config::MQHooksConfig,
     next_run_id: mq_protocol::RunId,
     /// All runs - status is derived from started_at/completed_at fields
@@ -142,7 +142,7 @@ impl MQState {
             queued_at: SystemTime::now(),
             started_at: None,
             completed_at: None,
-            merge_style: self.merge_style,
+            merge_mode: self.merge_mode,
             test_merge_output: String::new(),
             output: String::new(),
             active_jobs: Vec::new(),
@@ -158,14 +158,14 @@ impl MQState {
     }
 
     /// Start processing a queued run
-    /// Returns the run info, hooks, merge_style, and shared job states for processing
+    /// Returns the run info, hooks, merge_mode, and shared job states for processing
     fn start_run(
         &mut self,
         run_id: mq_protocol::RunId,
     ) -> Option<(
         mq_protocol::MQRunInfo,
         selfci::config::MQHooksConfig,
-        selfci::config::MergeStyle,
+        selfci::config::MergeMode,
         super::check::SharedJobStates,
     )> {
         let entry = self.runs.get_mut(&run_id)?;
@@ -185,7 +185,7 @@ impl MQState {
         Some((
             entry.info.clone(),
             self.hooks.clone(),
-            self.merge_style,
+            self.merge_mode,
             job_states,
         ))
     }
@@ -294,7 +294,7 @@ impl SharedMQState {
     ) -> Option<(
         mq_protocol::MQRunInfo,
         selfci::config::MQHooksConfig,
-        selfci::config::MergeStyle,
+        selfci::config::MergeMode,
         super::check::SharedJobStates,
     )> {
         self.0.lock().unwrap().start_run(run_id)
@@ -764,7 +764,7 @@ fn run_daemon_loop(
     let state = SharedMQState::new(MQState {
         root_dir: root_dir.clone(),
         base_branch: base_branch.clone(),
-        merge_style: merged_config.merge_style,
+        merge_mode: merged_config.merge_mode,
         hooks: merged_config.hooks,
         next_run_id: mq_protocol::RunId(1),
         runs: HashMap::new(),
@@ -1058,8 +1058,8 @@ fn process_queue(
             }
         };
 
-        // Move run from queued to active and get hooks, merge_style, and shared job states
-        let (mut run_info, hooks, merge_style, shared_job_states) = match state.start_run(run_id) {
+        // Move run from queued to active and get hooks, merge_mode, and shared job states
+        let (mut run_info, hooks, merge_mode, shared_job_states) = match state.start_run(run_id) {
             Some(result) => result,
             None => {
                 debug!("Run {} not found in queued map", run_id);
@@ -1130,12 +1130,12 @@ fn process_queue(
 
         // Create test merge/rebase of candidate onto base for CI testing
         let test_merge_result =
-            match create_test_merge(&root_dir, &base_branch, &run_info.candidate, &merge_style) {
+            match create_test_merge(&root_dir, &base_branch, &run_info.candidate, &merge_mode) {
                 Ok(result) => result,
                 Err(e) => {
-                    let fail_reason = match merge_style {
-                        selfci::config::MergeStyle::Rebase => mq_protocol::FailedReason::TestRebase,
-                        selfci::config::MergeStyle::Merge => mq_protocol::FailedReason::TestMerge,
+                    let fail_reason = match merge_mode {
+                        selfci::config::MergeMode::Rebase => mq_protocol::FailedReason::TestRebase,
+                        selfci::config::MergeMode::Merge => mq_protocol::FailedReason::TestMerge,
                     };
                     run_info.status = mq_protocol::MQRunStatus::Failed(fail_reason);
                     run_info.output.push_str(&format!(
@@ -1308,13 +1308,13 @@ fn process_queue(
                                 &base_branch,
                                 &run_info.candidate,
                                 &check_output,
-                                &merge_style,
+                                &merge_mode,
                             ) {
                                 Ok(merge_log) => {
                                     // Append merge output with separator
-                                    let header = match merge_style {
-                                        selfci::config::MergeStyle::Rebase => "### Final Rebase",
-                                        selfci::config::MergeStyle::Merge => "### Final Merge",
+                                    let header = match merge_mode {
+                                        selfci::config::MergeMode::Rebase => "### Final Rebase",
+                                        selfci::config::MergeMode::Merge => "### Final Merge",
                                     };
                                     run_info.output.push_str("\n\n");
                                     run_info.output.push_str(header);
@@ -1837,7 +1837,7 @@ pub(crate) fn create_test_merge(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
-    merge_style: &selfci::config::MergeStyle,
+    merge_mode: &selfci::config::MergeMode,
 ) -> Result<TestMergeOutcome, selfci::MergeError> {
     // Detect VCS
     let vcs = get_vcs(root_dir, None).map_err(|e| {
@@ -1847,19 +1847,19 @@ pub(crate) fn create_test_merge(
         ))
     })?;
 
-    debug!(vcs = ?vcs, merge_style = ?merge_style, "Creating test merge");
+    debug!(vcs = ?vcs, merge_mode = ?merge_mode, "Creating test merge");
 
-    match (vcs, merge_style) {
-        (selfci::VCS::Git, selfci::config::MergeStyle::Rebase) => {
+    match (vcs, merge_mode) {
+        (selfci::VCS::Git, selfci::config::MergeMode::Rebase) => {
             test_merge_git_rebase(root_dir, base_branch, candidate)
         }
-        (selfci::VCS::Git, selfci::config::MergeStyle::Merge) => {
+        (selfci::VCS::Git, selfci::config::MergeMode::Merge) => {
             test_merge_git_merge(root_dir, base_branch, candidate)
         }
-        (selfci::VCS::Jujutsu, selfci::config::MergeStyle::Rebase) => {
+        (selfci::VCS::Jujutsu, selfci::config::MergeMode::Rebase) => {
             test_merge_jj_rebase(root_dir, base_branch, candidate)
         }
-        (selfci::VCS::Jujutsu, selfci::config::MergeStyle::Merge) => {
+        (selfci::VCS::Jujutsu, selfci::config::MergeMode::Merge) => {
             test_merge_jj_merge(root_dir, base_branch, candidate)
         }
     }
@@ -2262,7 +2262,7 @@ fn merge_candidate(
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
     test_output: &str,
-    merge_style: &selfci::config::MergeStyle,
+    merge_mode: &selfci::config::MergeMode,
 ) -> Result<String, selfci::MergeError> {
     // Detect VCS
     let vcs = get_vcs(root_dir, None).map_err(|e| {
@@ -2272,17 +2272,17 @@ fn merge_candidate(
         ))
     })?;
 
-    match (vcs, merge_style) {
-        (selfci::VCS::Git, selfci::config::MergeStyle::Rebase) => {
+    match (vcs, merge_mode) {
+        (selfci::VCS::Git, selfci::config::MergeMode::Rebase) => {
             merge_candidate_git_rebase(root_dir, base_branch, candidate)
         }
-        (selfci::VCS::Git, selfci::config::MergeStyle::Merge) => {
+        (selfci::VCS::Git, selfci::config::MergeMode::Merge) => {
             merge_candidate_git_merge(root_dir, base_branch, candidate, test_output)
         }
-        (selfci::VCS::Jujutsu, selfci::config::MergeStyle::Rebase) => {
+        (selfci::VCS::Jujutsu, selfci::config::MergeMode::Rebase) => {
             merge_candidate_jj_rebase(root_dir, base_branch, candidate)
         }
-        (selfci::VCS::Jujutsu, selfci::config::MergeStyle::Merge) => {
+        (selfci::VCS::Jujutsu, selfci::config::MergeMode::Merge) => {
             merge_candidate_jj_merge(root_dir, base_branch, candidate, test_output)
         }
     }
@@ -2472,9 +2472,9 @@ pub fn get_status(run_id: u64) -> Result<(), MainError> {
             }
 
             if !run.test_merge_output.is_empty() {
-                let header = match run.merge_style {
-                    selfci::config::MergeStyle::Rebase => "### Pre-check Rebase",
-                    selfci::config::MergeStyle::Merge => "### Pre-check Merge",
+                let header = match run.merge_mode {
+                    selfci::config::MergeMode::Rebase => "### Pre-check Rebase",
+                    selfci::config::MergeMode::Merge => "### Pre-check Merge",
                 };
                 println!("\n{}\n", header);
                 println!("{}", run.test_merge_output);
