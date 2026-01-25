@@ -16,6 +16,9 @@ pub struct StepLogEntry {
     pub ts: SystemTime,
     pub name: String,
     pub status: StepStatus,
+    /// Job start time (only used for active steps display in MQ status)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_started_at: Option<SystemTime>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

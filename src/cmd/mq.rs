@@ -216,7 +216,7 @@ impl MQState {
                     .filter(|(job_name, _)| !s.completions.contains_key(*job_name))
                     .map(|(job_name, job_steps)| {
                         // Use first step timestamp as job start time
-                        let started_at = job_steps
+                        let job_started_at = job_steps
                             .first()
                             .map(|s| s.ts)
                             .unwrap_or_else(SystemTime::now);
@@ -225,19 +225,19 @@ impl MQState {
                         let current_step = job_steps
                             .iter()
                             .rev()
-                            .find(|s| matches!(s.status, protocol::StepStatus::Running))
-                            .map(|s| s.name.clone());
+                            .find(|s| matches!(s.status, protocol::StepStatus::Running));
 
-                        let name = if let Some(step) = current_step {
-                            format!("{}/{}", job_name, step)
+                        let (name, step_started_at) = if let Some(step) = current_step {
+                            (format!("{}/{}", job_name, step.name), step.ts)
                         } else {
-                            job_name.clone()
+                            (job_name.clone(), job_started_at)
                         };
 
                         protocol::StepLogEntry {
-                            ts: started_at,
+                            ts: step_started_at,
                             name,
                             status: protocol::StepStatus::Running,
+                            job_started_at: Some(job_started_at),
                         }
                     })
                     .collect()
@@ -2442,24 +2442,33 @@ pub fn get_status(run_id: u64) -> Result<(), MainError> {
                     humantime::format_rfc3339_seconds(started_at)
                 );
 
-                // Show active jobs if the run is still running
+                // Show active steps if the run is still running
                 if matches!(run.status, mq_protocol::MQRunStatus::Running) {
                     let now = std::time::SystemTime::now();
                     let active: Vec<_> = run
                         .active_jobs
                         .iter()
-                        .filter(|job| matches!(job.status, protocol::StepStatus::Running))
+                        .filter(|step| matches!(step.status, protocol::StepStatus::Running))
                         .collect();
 
                     if !active.is_empty() {
                         let active_strs: Vec<String> = active
                             .iter()
-                            .map(|job| {
-                                let elapsed = now.duration_since(job.ts).unwrap_or_default();
-                                format!("{} ({:.3}s)", job.name, elapsed.as_secs_f64())
+                            .map(|step| {
+                                let step_elapsed = now.duration_since(step.ts).unwrap_or_default();
+                                let job_elapsed = step
+                                    .job_started_at
+                                    .and_then(|t| now.duration_since(t).ok())
+                                    .unwrap_or(step_elapsed);
+                                format!(
+                                    "{} ({:.1}s/{:.1}s)",
+                                    step.name,
+                                    step_elapsed.as_secs_f64(),
+                                    job_elapsed.as_secs_f64()
+                                )
                             })
                             .collect();
-                        println!("Active Jobs: {}", active_strs.join(", "));
+                        println!("Active Steps: {}", active_strs.join(", "));
                     }
                 }
             }

@@ -349,6 +349,7 @@ pub fn control_socket_listener(
                                         ts,
                                         name: step_name.clone(),
                                         status: protocol::StepStatus::Running,
+                                        job_started_at: None,
                                     };
                                     job_steps_vec.push(entry);
 
