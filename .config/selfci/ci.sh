@@ -11,7 +11,7 @@ function job_lint() {
 # this gives us caching between different
 # builds and decent isolation.
 function job_cargo() {
-    selfci step start "cargo.lock up to date"
+    selfci step start "cargo.lock"
     if ! cargo update --workspace --locked -q; then
       selfci step fail
     fi
