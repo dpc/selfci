@@ -1313,7 +1313,13 @@ fn process_queue(
                             ) {
                                 Ok(merge_log) => {
                                     // Append merge output with separator
-                                    run_info.output.push_str("\n\n### Merge Output\n\n");
+                                    let header = match merge_style {
+                                        selfci::config::MergeStyle::Rebase => "### Final Rebase",
+                                        selfci::config::MergeStyle::Merge => "### Final Merge",
+                                    };
+                                    run_info.output.push_str("\n\n");
+                                    run_info.output.push_str(header);
+                                    run_info.output.push_str("\n\n");
                                     run_info.output.push_str(&merge_log);
 
                                     // Run post-merge hook if configured
@@ -2468,9 +2474,9 @@ pub fn get_status(run_id: u64) -> Result<(), MainError> {
 
             if !run.test_merge_output.is_empty() {
                 let header = match run.merge_style {
-                    Some(selfci::config::MergeStyle::Rebase) => "### Test Rebase",
-                    Some(selfci::config::MergeStyle::Merge) => "### Test Merge",
-                    None => "### Test Merge/Rebase",
+                    Some(selfci::config::MergeStyle::Rebase) => "### Pre-check Rebase",
+                    Some(selfci::config::MergeStyle::Merge) => "### Pre-check Merge",
+                    None => "### Pre-check Merge/Rebase",
                 };
                 println!("\n{}\n", header);
                 println!("{}", run.test_merge_output);
