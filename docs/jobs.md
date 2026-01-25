@@ -61,7 +61,7 @@ When base and candidate differ (diverging history), additional environment varia
 
 When base and candidate are the same commit (no diverging history), `SELFCI_MERGED_*` is not set since no merge is needed.
 
-The merge style (rebase or merge) is controlled by the `mq.merge-style` config option (defaults to `rebase`).
+The merge mode (rebase or merge) is controlled by the `mq.merge-style` config option (defaults to `rebase`).
 
 ## Steps
 

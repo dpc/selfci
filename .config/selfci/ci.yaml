@@ -6,4 +6,4 @@ job:
 
 mq:
   base-branch: master
-  merge-style: rebase
+  merge-mode: rebase

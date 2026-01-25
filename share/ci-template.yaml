@@ -28,7 +28,7 @@ job:
 #   # Merge style: "rebase" or "merge" (default: rebase)
 #   # - rebase: Rebase candidate commits on top of base branch (no merge commit)
 #   # - merge: Create a merge commit
-#   merge-style: rebase
+#   merge-mode: rebase
 #
 #   # MQ hooks - run at different stages of the merge queue process
 #   # Each hook has: command (required), command-prefix (optional, default: ["bash", "-c"])

@@ -10,9 +10,9 @@ use tempfile::TempDir;
 
 /// Parse an env file (output of `env` command) into a HashMap
 /// Only includes SELFCI_* variables
-pub fn parse_selfci_env_file(path: &Path) -> HashMap<String, String> {
-    let content = fs::read_to_string(path).unwrap_or_default();
-    content
+pub fn parse_selfci_env_file(path: &Path) -> std::io::Result<HashMap<String, String>> {
+    let content = fs::read_to_string(path)?;
+    Ok(content
         .lines()
         .filter_map(|line| {
             let (key, value) = line.split_once('=')?;
@@ -22,7 +22,7 @@ pub fn parse_selfci_env_file(path: &Path) -> HashMap<String, String> {
                 None
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Helper to build config path

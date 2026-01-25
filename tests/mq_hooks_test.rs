@@ -1004,8 +1004,8 @@ mq:
     );
 
     // Parse env vars from hook output files
-    let pre_clone_vars = parse_selfci_env_file(&pre_clone_env);
-    let post_merge_vars = parse_selfci_env_file(&post_merge_env);
+    let pre_clone_vars = parse_selfci_env_file(&pre_clone_env).unwrap();
+    let post_merge_vars = parse_selfci_env_file(&post_merge_env).unwrap();
 
     eprintln!("\n=== pre-clone env vars ===\n{:#?}", pre_clone_vars);
     eprintln!("\n=== post-merge env vars ===\n{:#?}", post_merge_vars);
@@ -1056,5 +1056,126 @@ mq:
         pre_clone_vars.get("SELFCI_CANDIDATE_COMMIT_ID"),
         post_merge_vars.get("SELFCI_CANDIDATE_COMMIT_ID"),
         "pre-clone and post-merge should see the same SELFCI_CANDIDATE_COMMIT_ID"
+    );
+}
+
+#[test]
+fn test_invalid_local_config_fails_daemon_start() {
+    let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let repo_path = repo_dir.path();
+
+    // Initialize git repo
+    cmd!("git", "init").dir(repo_path).run().unwrap();
+    cmd!("git", "config", "user.name", "Test User")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("git", "config", "user.email", "test@example.com")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
+
+    // Create valid ci.yaml
+    let ci_config = r#"
+job:
+  command: echo test
+
+mq:
+  base-branch: main
+"#;
+    fs::write(repo_path.join(".config/selfci/ci.yaml"), ci_config).unwrap();
+
+    // Create INVALID local.yaml with syntax error
+    let invalid_local_config = r#"
+mq:
+  pre-start:
+    command: echo hello
+  invalid_field_that_doesnt_exist: true
+"#;
+    fs::write(
+        repo_path.join(".config/selfci/local.yaml"),
+        invalid_local_config,
+    )
+    .unwrap();
+
+    // Create initial commit
+    fs::write(repo_path.join("main.txt"), "content").unwrap();
+    cmd!("git", "add", ".").dir(repo_path).run().unwrap();
+    cmd!("git", "commit", "-m", "Initial commit")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Try to start daemon - should fail due to invalid config
+    let start_result = cmd!(selfci_bin(), "mq", "start", "--base-branch", "main")
+        .dir(repo_path)
+        .stderr_to_stdout()
+        .unchecked()
+        .read();
+
+    // Daemon should fail to start
+    assert!(
+        start_result.is_err() || {
+            let output = start_result.as_ref().unwrap();
+            output.contains("unknown field") || output.contains("Error")
+        },
+        "Daemon should fail to start with invalid local.yaml: {:?}",
+        start_result
+    );
+}
+
+#[test]
+fn test_invalid_ci_config_fails_daemon_start() {
+    let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let repo_path = repo_dir.path();
+
+    // Initialize git repo
+    cmd!("git", "init").dir(repo_path).run().unwrap();
+    cmd!("git", "config", "user.name", "Test User")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("git", "config", "user.email", "test@example.com")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
+
+    // Create INVALID ci.yaml with syntax error (missing required field)
+    let invalid_ci_config = r#"
+mq:
+  base-branch: main
+  unknown_field: value
+"#;
+    fs::write(repo_path.join(".config/selfci/ci.yaml"), invalid_ci_config).unwrap();
+
+    // Create initial commit
+    fs::write(repo_path.join("main.txt"), "content").unwrap();
+    cmd!("git", "add", ".").dir(repo_path).run().unwrap();
+    cmd!("git", "commit", "-m", "Initial commit")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Try to start daemon - should fail due to invalid config
+    let start_result = cmd!(selfci_bin(), "mq", "start", "--base-branch", "main")
+        .dir(repo_path)
+        .stderr_to_stdout()
+        .unchecked()
+        .read();
+
+    // Daemon should fail to start
+    assert!(
+        start_result.is_err() || {
+            let output = start_result.as_ref().unwrap();
+            output.contains("unknown field")
+                || output.contains("missing field")
+                || output.contains("Error")
+        },
+        "Daemon should fail to start with invalid ci.yaml: {:?}",
+        start_result
     );
 }

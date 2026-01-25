@@ -585,7 +585,7 @@ fn start_daemon_common(
 
     // Run pre-start hook BEFORE daemonization with inherited stdio
     // This allows interactive commands (e.g., password prompts, keychain unlock)
-    let merged_config = selfci::config::read_merged_mq_config(root_dir).unwrap_or_default();
+    let merged_config = selfci::config::read_merged_mq_config(root_dir)?;
     if !run_hook_interactive(
         merged_config.hooks.pre_start.as_ref(),
         "pre-start",
@@ -669,7 +669,7 @@ fn run_daemon_loop(
     listener: UnixListener,
 ) -> Result<(), MainError> {
     // Read merged config to get hooks
-    let merged_config = selfci::config::read_merged_mq_config(&root_dir).unwrap_or_default();
+    let merged_config = selfci::config::read_merged_mq_config(&root_dir)?;
     debug!(
         "Loaded MQ hooks config: pre_start={}, post_start={}, pre_clone={}, post_clone={}, pre_merge={}, post_merge={}",
         merged_config

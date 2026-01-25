@@ -298,7 +298,7 @@ fn verify_env_vars(repo_path: &Path) {
     };
 
     // Parse env vars from CI output
-    let env_vars = parse_selfci_env_file(&env_file_path);
+    let env_vars = parse_selfci_env_file(&env_file_path).unwrap();
 
     eprintln!("\n=== CI env vars ===\n{:#?}", env_vars);
 
@@ -657,7 +657,7 @@ fn test_git_check_same_base_candidate() {
     );
 
     // Parse env vars from CI output
-    let env_vars = parse_selfci_env_file(&env_file);
+    let env_vars = parse_selfci_env_file(&env_file).unwrap();
 
     eprintln!("\n=== CI env vars ===\n{:#?}", env_vars);
 
