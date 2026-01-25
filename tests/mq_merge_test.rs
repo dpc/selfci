@@ -95,7 +95,7 @@ fn extract_run_id(output: &str) -> u64 {
 }
 
 /// Setup a base Git repository with just main branch and initial commit
-fn setup_git_base_repo(merge_style: &str) -> tempfile::TempDir {
+fn setup_git_base_repo(merge_mode: &str) -> tempfile::TempDir {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
 
@@ -110,7 +110,7 @@ fn setup_git_base_repo(merge_style: &str) -> tempfile::TempDir {
         .run()
         .unwrap();
 
-    // Create config with merge style
+    // Create config with merge mode
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
@@ -119,7 +119,7 @@ fn setup_git_base_repo(merge_style: &str) -> tempfile::TempDir {
   command: 'true'
 mq:
   base-branch: main
-  merge-style: {merge_style}
+  merge-mode: {merge_mode}
 "#
         ),
     )
@@ -193,7 +193,7 @@ fn create_git_candidate(repo_path: &Path, candidate_num: usize) -> String {
 
 /// Setup a base Jujutsu repository with just main bookmark and initial commit
 /// Returns (repo_dir, test_home_path)
-fn setup_jj_base_repo(merge_style: &str) -> (tempfile::TempDir, PathBuf) {
+fn setup_jj_base_repo(merge_mode: &str) -> (tempfile::TempDir, PathBuf) {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
 
@@ -229,7 +229,7 @@ fn setup_jj_base_repo(merge_style: &str) -> (tempfile::TempDir, PathBuf) {
     .run()
     .unwrap();
 
-    // Create config with merge style
+    // Create config with merge mode
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
     fs::write(
         repo_path.join(".config/selfci/ci.yaml"),
@@ -238,7 +238,7 @@ fn setup_jj_base_repo(merge_style: &str) -> (tempfile::TempDir, PathBuf) {
   command: 'true'
 mq:
   base-branch: main
-  merge-style: {merge_style}
+  merge-mode: {merge_mode}
 "#
         ),
     )
@@ -362,7 +362,7 @@ fn verify_working_dir_unchanged_jj(repo_path: &Path) {
 }
 
 /// Verify that all candidates were merged into main (git)
-fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_style: &str) {
+fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_mode: &str) {
     // Force update working directory to match main branch state
     cmd!("git", "reset", "--hard", "main")
         .dir(repo_path)
@@ -388,7 +388,7 @@ fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_style: &
         .unwrap();
 
     for candidate in 1..=num_candidates {
-        if merge_style == "rebase" {
+        if merge_mode == "rebase" {
             // Rebase mode should have linear history with all commits
             for commit in 1..=3 {
                 assert!(
@@ -403,7 +403,7 @@ fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_style: &
 
     eprintln!(
         "\n=== git {} merge result ({} candidates) ===",
-        merge_style, num_candidates
+        merge_mode, num_candidates
     );
     cmd!(
         "git",
@@ -420,7 +420,7 @@ fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_style: &
 }
 
 /// Verify that all candidates were merged into main (jj)
-fn verify_all_merged_jj(repo_path: &Path, num_candidates: usize, merge_style: &str) {
+fn verify_all_merged_jj(repo_path: &Path, num_candidates: usize, merge_mode: &str) {
     // Check all feature files exist in main bookmark
     let files = cmd!("jj", "file", "list", "-r", "main")
         .dir(repo_path)
@@ -453,7 +453,7 @@ fn verify_all_merged_jj(repo_path: &Path, num_candidates: usize, merge_style: &s
     .unwrap();
 
     for candidate in 1..=num_candidates {
-        if merge_style == "rebase" {
+        if merge_mode == "rebase" {
             for commit in 1..=3 {
                 assert!(
                     log.contains(&format!("Feature {} commit {}", candidate, commit)),
@@ -467,7 +467,7 @@ fn verify_all_merged_jj(repo_path: &Path, num_candidates: usize, merge_style: &s
 
     eprintln!(
         "\n=== jj {} merge result ({} candidates) ===",
-        merge_style, num_candidates
+        merge_mode, num_candidates
     );
     cmd!(
         "jj",
@@ -482,8 +482,8 @@ fn verify_all_merged_jj(repo_path: &Path, num_candidates: usize, merge_style: &s
 }
 
 /// Run the git merge test with N candidates
-fn run_git_merge_test(merge_style: &str, num_candidates: usize) {
-    let repo = setup_git_base_repo(merge_style);
+fn run_git_merge_test(merge_mode: &str, num_candidates: usize) {
+    let repo = setup_git_base_repo(merge_mode);
     let repo_path = repo.path();
 
     // Create N candidates
@@ -534,12 +534,12 @@ fn run_git_merge_test(merge_style: &str, num_candidates: usize) {
     verify_working_dir_unchanged_git(repo_path);
 
     // Verify all candidates were merged
-    verify_all_merged_git(repo_path, num_candidates, merge_style);
+    verify_all_merged_git(repo_path, num_candidates, merge_mode);
 }
 
 /// Run the jj merge test with N candidates
-fn run_jj_merge_test(merge_style: &str, num_candidates: usize) {
-    let (repo, test_home) = setup_jj_base_repo(merge_style);
+fn run_jj_merge_test(merge_mode: &str, num_candidates: usize) {
+    let (repo, test_home) = setup_jj_base_repo(merge_mode);
     let repo_path = repo.path();
 
     // Create N candidates
@@ -603,7 +603,7 @@ fn run_jj_merge_test(merge_style: &str, num_candidates: usize) {
     verify_working_dir_unchanged_jj(repo_path);
 
     // Verify all candidates were merged
-    verify_all_merged_jj(repo_path, num_candidates, merge_style);
+    verify_all_merged_jj(repo_path, num_candidates, merge_mode);
 }
 
 // ============================================================================

@@ -14,7 +14,7 @@ fn selfci_bin() -> String {
 }
 
 /// Setup a Git repository with diverging history for test merge verification
-fn setup_git_check_repo(merge_style: &str) -> tempfile::TempDir {
+fn setup_git_check_repo(merge_mode: &str) -> tempfile::TempDir {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
 
@@ -29,7 +29,7 @@ fn setup_git_check_repo(merge_style: &str) -> tempfile::TempDir {
         .run()
         .unwrap();
 
-    // Create config with merge style
+    // Create config with merge mode
     // CI command dumps all env vars to a file for verification
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
     let env_file = repo_path.join(".ci_env");
@@ -40,7 +40,7 @@ fn setup_git_check_repo(merge_style: &str) -> tempfile::TempDir {
   command: 'env > {env_file}'
 mq:
   base-branch: main
-  merge-style: {merge_style}
+  merge-mode: {merge_mode}
 "#,
             env_file = env_file.display(),
         ),
@@ -116,7 +116,7 @@ mq:
 }
 
 /// Setup a Jujutsu repository with diverging history for test merge verification
-fn setup_jj_check_repo(merge_style: &str) -> tempfile::TempDir {
+fn setup_jj_check_repo(merge_mode: &str) -> tempfile::TempDir {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
 
@@ -153,7 +153,7 @@ fn setup_jj_check_repo(merge_style: &str) -> tempfile::TempDir {
     .run()
     .unwrap();
 
-    // Create config with merge style
+    // Create config with merge mode
     // CI command dumps all env vars to a file for verification
     fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
     let output_dir = repo_path.join(".ci_output");
@@ -166,7 +166,7 @@ fn setup_jj_check_repo(merge_style: &str) -> tempfile::TempDir {
   command: 'env > {env_file}'
 mq:
   base-branch: main
-  merge-style: {merge_style}
+  merge-mode: {merge_mode}
 "#,
             env_file = env_file.display(),
         ),

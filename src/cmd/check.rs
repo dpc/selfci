@@ -653,14 +653,13 @@ pub fn check(
         "Starting check"
     );
 
-    // Read config to get merge style (default to Rebase)
-    let merge_mode = read_config(&root_dir)
-        .ok()
-        .and_then(|c| c.mq)
+    // Read config to get merge mode (default to Rebase)
+    let merge_mode = read_config(&root_dir)?
+        .mq
         .map(|mq| mq.merge_mode)
         .unwrap_or_default();
 
-    debug!(merge_mode = ?merge_mode, "Using merge style for test merge");
+    debug!(merge_mode = ?merge_mode, "Using merge mode for test merge");
 
     // Create test merge/rebase of candidate onto base for CI testing
     // This ensures we test what would actually be merged, just like MQ mode

@@ -94,7 +94,7 @@ fn setup_git_repo_with_hooks() -> tempfile::TempDir {
 
 mq:
   base-branch: main
-  merge-style: merge
+  merge-mode: merge
   pre-clone:
     command: 'echo "pre-clone from ci.yaml" && touch pre_clone_executed.txt'
   post-merge:
@@ -456,7 +456,7 @@ fn test_pre_merge_hook_failure() {
 
 mq:
   base-branch: main
-  merge-style: merge
+  merge-mode: merge
   pre-merge:
     command: 'echo "pre-merge failing" && exit 1'
 "#,
@@ -916,7 +916,7 @@ fn test_hook_env_vars() {
 
 mq:
   base-branch: main
-  merge-style: merge
+  merge-mode: merge
   pre-clone:
     command: 'env > {pre_clone}'
   post-merge:
