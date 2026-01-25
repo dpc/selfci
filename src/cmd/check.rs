@@ -137,6 +137,45 @@ fn run_post_clone_hook(
 /// - The working candidate (after test merge/rebase) -> SELFCI_MERGED_* env vars
 ///
 /// In regular check mode, `original_candidate` is None and SELFCI_MERGED_* is not set.
+
+/// State for tracking jobs during check execution.
+#[derive(Default)]
+pub struct JobStates {
+    /// Steps for each job - key is job name
+    pub steps: HashMap<String, Vec<protocol::StepLogEntry>>,
+    /// Completion status for each job
+    pub completions: HashMap<String, protocol::JobStatus>,
+}
+
+/// Shared state for tracking jobs during check execution.
+/// Can be passed in to allow external monitoring of job progress.
+#[derive(Clone)]
+pub struct SharedJobStates(Arc<Mutex<JobStates>>);
+
+impl SharedJobStates {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(JobStates::default())))
+    }
+
+    /// Access the inner state with a closure
+    pub fn with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&JobStates) -> R,
+    {
+        let guard = self.0.lock().unwrap();
+        f(&guard)
+    }
+
+    /// Mutably access the inner state with a closure
+    pub fn with_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut JobStates) -> R,
+    {
+        let mut guard = self.0.lock().unwrap();
+        f(&mut guard)
+    }
+}
+
 pub fn run_candidate_check(
     root_dir: &Path,
     base_rev: &ResolvedRevision,
@@ -146,6 +185,7 @@ pub fn run_candidate_check(
     mode: CheckMode,
     post_clone_hook: Option<PostCloneHookConfig<'_>>,
     original_candidate: Option<&ResolvedRevision>,
+    shared_job_states: Option<&SharedJobStates>,
 ) -> Result<CheckResult, MainError> {
     // Get VCS (forced or auto-detected)
     let vcs = get_vcs(root_dir, forced_vcs)?;
@@ -228,16 +268,13 @@ pub fn run_candidate_check(
     let (messages_sender, messages_receiver) = mpsc::channel::<super::worker::JobMessage>();
     let jobs_receiver = Arc::new(Mutex::new(jobs_receiver));
 
-    // Track steps for each job
-    let job_steps = Arc::new(Mutex::new(
-        HashMap::<String, Vec<protocol::StepLogEntry>>::new(),
-    ));
+    // Use provided jobs state or create local one
+    let shared_job_states = shared_job_states
+        .cloned()
+        .unwrap_or_else(SharedJobStates::new);
 
     // Track used job names
     let used_job_names = Arc::new(Mutex::new(std::collections::HashSet::new()));
-
-    // Track job completions (for job wait)
-    let job_completions = Arc::new(Mutex::new(HashMap::<String, protocol::JobStatus>::new()));
 
     // Spawn worker threads
     for _ in 0..parallelism {
@@ -253,9 +290,8 @@ pub fn run_candidate_check(
     let listener_shutdown = Arc::new(AtomicBool::new(false));
 
     // Spawn control socket listener thread
-    let job_steps_clone = Arc::clone(&job_steps);
+    let shared_job_states_clone = shared_job_states.clone();
     let used_job_names_clone = Arc::clone(&used_job_names);
-    let job_completions_clone = Arc::clone(&job_completions);
     let jobs_sender_clone = jobs_sender.clone();
     let messages_sender_clone = messages_sender.clone();
     let listener_shutdown_clone = Arc::clone(&listener_shutdown);
@@ -290,9 +326,8 @@ pub fn run_candidate_check(
     std::thread::spawn(move || {
         super::worker::control_socket_listener(
             listener,
-            job_steps_clone,
+            shared_job_states_clone,
             used_job_names_clone,
-            job_completions_clone,
             jobs_sender_clone,
             messages_sender_clone,
             spawn_context,
@@ -368,10 +403,8 @@ pub fn run_candidate_check(
                 step_name,
             } => {
                 debug!(job = %job_name, step = %step_name, "Step started");
-                step_start_times.insert(
-                    (job_name.clone(), step_name.clone()),
-                    std::time::Instant::now(),
-                );
+                let now = std::time::Instant::now();
+                step_start_times.insert((job_name.clone(), step_name.clone()), now);
             }
             super::worker::JobMessage::StepCompleted {
                 job_name,
@@ -409,21 +442,23 @@ pub fn run_candidate_check(
                 debug!(job = %outcome.job_name, exit_code = ?outcome.exit_code, "completed");
 
                 // Look up steps for this job and mark Running steps as Success
-                {
-                    let steps_map = job_steps.lock().unwrap();
-                    if let Some(steps) = steps_map.get(&outcome.job_name) {
-                        outcome.steps = steps
-                            .iter()
-                            .map(|step| {
-                                let mut step = step.clone();
-                                if matches!(step.status, protocol::StepStatus::Running) {
-                                    step.status = protocol::StepStatus::Success;
-                                }
-                                step
-                            })
-                            .collect();
-                    }
-                }
+                outcome.steps = shared_job_states.with(|s| {
+                    s.steps
+                        .get(&outcome.job_name)
+                        .map(|steps| {
+                            steps
+                                .iter()
+                                .map(|step| {
+                                    let mut step = step.clone();
+                                    if matches!(step.status, protocol::StepStatus::Running) {
+                                        step.status = protocol::StepStatus::Success;
+                                    }
+                                    step
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                });
 
                 // Output completion for the last running step (if any)
                 if let Some(last_step) = outcome.steps.last() {
@@ -471,9 +506,8 @@ pub fn run_candidate_check(
                 }
 
                 // Record job completion status for wait command
-                {
-                    let mut completions = job_completions.lock().unwrap();
-                    completions.insert(
+                shared_job_states.with_mut(|s| {
+                    s.completions.insert(
                         outcome.job_name.clone(),
                         if job_failed {
                             protocol::JobStatus::Failed
@@ -481,7 +515,7 @@ pub fn run_candidate_check(
                             protocol::JobStatus::Succeeded
                         },
                     );
-                }
+                });
 
                 // Output job completion status
                 let jobs_completed = total_jobs - active_jobs + 1;
@@ -539,6 +573,19 @@ pub fn run_candidate_check(
         }
     }
 
+    // Output final run summary
+    let total_duration = check_start.elapsed();
+    let run_emoji = if any_job_failed { "❌" } else { "✅" };
+    let run_status = if any_job_failed { "failed" } else { "passed" };
+    output!(
+        "[{}/{}] {} {} ({:.3}s)",
+        total_jobs,
+        total_jobs,
+        run_emoji,
+        run_status,
+        total_duration.as_secs_f64()
+    );
+
     // Signal control socket listener to shut down and wake it up
     listener_shutdown.store(true, Ordering::SeqCst);
     let _ = UnixStream::connect(&socket_path); // Wake up blocking accept()
@@ -550,8 +597,6 @@ pub fn run_candidate_check(
     let _ = std::fs::remove_file(&socket_path);
 
     // Return aggregated result from all jobs
-    let total_duration = check_start.elapsed();
-
     Ok(CheckResult {
         output: all_outputs,
         steps: all_steps,
@@ -703,6 +748,7 @@ pub fn check(
         CheckMode::Inline { print_output },
         None, // No post-clone hook for inline checks
         original_candidate,
+        None, // No step callback for inline checks
     )?;
 
     // Print total time

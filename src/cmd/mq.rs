@@ -107,94 +107,156 @@ fn verify_daemon_running(daemon_dir: &Path) -> bool {
     )
 }
 
+/// Internal run entry that holds both the protocol info and runtime state
+struct RunEntry {
+    info: mq_protocol::MQRunInfo,
+    /// Job states for active runs - used for real-time job status tracking
+    /// Only present while the run is active (started but not completed)
+    job_states: Option<super::check::SharedJobStates>,
+}
+
 struct MQState {
     root_dir: PathBuf,
     base_branch: String,
     merge_style: selfci::config::MergeStyle,
     hooks: selfci::config::MQHooksConfig,
-    next_job_id: u64,
-    queued: HashMap<u64, mq_protocol::MQJobInfo>,
-    active: HashMap<u64, mq_protocol::MQJobInfo>,
-    completed: Vec<mq_protocol::MQJobInfo>,
+    next_run_id: mq_protocol::RunId,
+    /// All runs - status is derived from started_at/completed_at fields
+    runs: HashMap<mq_protocol::RunId, RunEntry>,
 }
 
 impl MQState {
-    /// Create and queue a new job, returning the job ID
-    fn queue_job(
+    /// Create and queue a new run, returning the run info
+    fn queue_run(
         &mut self,
         candidate: selfci::revision::ResolvedRevision,
         no_merge: bool,
-    ) -> mq_protocol::MQJobInfo {
-        let job_id = self.next_job_id;
-        self.next_job_id += 1;
+    ) -> mq_protocol::MQRunInfo {
+        let run_id = self.next_run_id;
+        self.next_run_id = mq_protocol::RunId(self.next_run_id.0 + 1);
 
-        let job = mq_protocol::MQJobInfo {
-            id: job_id,
+        let info = mq_protocol::MQRunInfo {
+            id: run_id,
             candidate,
-            status: mq_protocol::MQJobStatus::Queued,
+            status: mq_protocol::MQRunStatus::Queued,
             queued_at: SystemTime::now(),
             started_at: None,
             completed_at: None,
             merge_style: None,
             test_merge_output: String::new(),
             output: String::new(),
-            steps: Vec::new(),
+            active_jobs: Vec::new(),
             no_merge,
         };
 
-        self.queued.insert(job_id, job.clone());
-        job
+        let entry = RunEntry {
+            info: info.clone(),
+            job_states: None,
+        };
+        self.runs.insert(run_id, entry);
+        info
     }
 
-    /// Move a job from queued to active (start processing it)
-    /// Returns the job info along with hooks and merge_style needed for processing
-    fn start_job(
+    /// Start processing a queued run
+    /// Returns the run info, hooks, merge_style, and shared job states for processing
+    fn start_run(
         &mut self,
-        job_id: u64,
+        run_id: mq_protocol::RunId,
     ) -> Option<(
-        mq_protocol::MQJobInfo,
+        mq_protocol::MQRunInfo,
         selfci::config::MQHooksConfig,
         selfci::config::MergeStyle,
+        super::check::SharedJobStates,
     )> {
-        let mut job = self.queued.remove(&job_id)?;
-        job.status = mq_protocol::MQJobStatus::Running;
-        job.started_at = Some(SystemTime::now());
-        self.active.insert(job_id, job.clone());
-        Some((job, self.hooks.clone(), self.merge_style.clone()))
-    }
+        let entry = self.runs.get_mut(&run_id)?;
 
-    /// Move a job from active to completed
-    fn complete_job(&mut self, job_id: u64, job_info: mq_protocol::MQJobInfo) {
-        self.active.remove(&job_id);
-        self.completed.push(job_info);
-    }
-
-    /// Get a job by ID (searches queued, active, and completed)
-    fn get_job(&self, job_id: u64) -> Option<mq_protocol::MQJobInfo> {
-        self.queued
-            .get(&job_id)
-            .or_else(|| self.active.get(&job_id))
-            .cloned()
-            .or_else(|| self.completed.iter().find(|j| j.id == job_id).cloned())
-    }
-
-    /// List all jobs (queued, active, completed), sorted by ID descending, with optional limit
-    fn list_jobs(&self, limit: Option<usize>) -> Vec<mq_protocol::MQJobInfo> {
-        let mut jobs: Vec<_> = self
-            .queued
-            .values()
-            .chain(self.active.values())
-            .chain(self.completed.iter())
-            .cloned()
-            .collect();
-
-        jobs.sort_by(|a, b| b.id.cmp(&a.id));
-
-        if let Some(limit) = limit {
-            jobs.truncate(limit);
+        // Only start if queued (started_at is None)
+        if entry.info.started_at.is_some() {
+            return None;
         }
 
-        jobs
+        entry.info.status = mq_protocol::MQRunStatus::Running;
+        entry.info.started_at = Some(SystemTime::now());
+
+        // Create shared job states for real-time job status
+        let job_states = super::check::SharedJobStates::new();
+        entry.job_states = Some(job_states.clone());
+
+        Some((
+            entry.info.clone(),
+            self.hooks.clone(),
+            self.merge_style,
+            job_states,
+        ))
+    }
+
+    /// Complete an active run by updating its state in place
+    fn complete_run(&mut self, run_id: mq_protocol::RunId, run_info: mq_protocol::MQRunInfo) {
+        if let Some(entry) = self.runs.get_mut(&run_id) {
+            entry.info = run_info;
+            entry.job_states = None; // Clear job states when run completes
+        }
+    }
+
+    /// Get a run by ID
+    /// For active runs (started but not completed), includes real-time active jobs info
+    fn get_run(&self, run_id: mq_protocol::RunId) -> Option<mq_protocol::MQRunInfo> {
+        let entry = self.runs.get(&run_id)?;
+        let mut info = entry.info.clone();
+
+        // For active runs (started but not completed), derive running jobs from steps and completions
+        if info.started_at.is_some() && info.completed_at.is_none() {
+            if let Some(ref job_states) = entry.job_states {
+                // Jobs that have steps but aren't in completions are running
+                info.active_jobs = job_states.with(|s| {
+                    s.steps
+                        .iter()
+                        .filter(|(job_name, _)| !s.completions.contains_key(*job_name))
+                        .map(|(job_name, job_steps)| {
+                            // Use first step timestamp as job start time
+                            let started_at = job_steps
+                                .first()
+                                .map(|s| s.ts)
+                                .unwrap_or_else(SystemTime::now);
+
+                            // Find current step (last one with Running status)
+                            let current_step = job_steps
+                                .iter()
+                                .rev()
+                                .find(|s| matches!(s.status, protocol::StepStatus::Running))
+                                .map(|s| s.name.clone());
+
+                            let name = if let Some(step) = current_step {
+                                format!("{}/{}", job_name, step)
+                            } else {
+                                job_name.clone()
+                            };
+
+                            protocol::StepLogEntry {
+                                ts: started_at,
+                                name,
+                                status: protocol::StepStatus::Running,
+                            }
+                        })
+                        .collect()
+                });
+            }
+        }
+
+        Some(info)
+    }
+
+    /// List all runs, sorted by ID descending, with optional limit
+    fn list_runs(&self, limit: Option<usize>) -> Vec<mq_protocol::MQRunInfo> {
+        let mut runs: Vec<_> = self.runs.values().map(|e| e.info.clone()).collect();
+
+        runs.sort_by(|a, b| b.id.0.cmp(&a.id.0));
+
+        if let Some(limit) = limit {
+            runs.truncate(limit);
+        }
+
+        runs
     }
 
     /// Get the root directory
@@ -217,35 +279,36 @@ impl SharedMQState {
         Self(Arc::new(Mutex::new(state)))
     }
 
-    fn queue_job(
+    fn queue_run(
         &self,
         candidate: selfci::revision::ResolvedRevision,
         no_merge: bool,
-    ) -> mq_protocol::MQJobInfo {
-        self.0.lock().unwrap().queue_job(candidate, no_merge)
+    ) -> mq_protocol::MQRunInfo {
+        self.0.lock().unwrap().queue_run(candidate, no_merge)
     }
 
-    fn start_job(
+    fn start_run(
         &self,
-        job_id: u64,
+        run_id: mq_protocol::RunId,
     ) -> Option<(
-        mq_protocol::MQJobInfo,
+        mq_protocol::MQRunInfo,
         selfci::config::MQHooksConfig,
         selfci::config::MergeStyle,
+        super::check::SharedJobStates,
     )> {
-        self.0.lock().unwrap().start_job(job_id)
+        self.0.lock().unwrap().start_run(run_id)
     }
 
-    fn complete_job(&self, job_id: u64, job_info: mq_protocol::MQJobInfo) {
-        self.0.lock().unwrap().complete_job(job_id, job_info)
+    fn complete_run(&self, run_id: mq_protocol::RunId, run_info: mq_protocol::MQRunInfo) {
+        self.0.lock().unwrap().complete_run(run_id, run_info)
     }
 
-    fn get_job(&self, job_id: u64) -> Option<mq_protocol::MQJobInfo> {
-        self.0.lock().unwrap().get_job(job_id)
+    fn get_run(&self, run_id: mq_protocol::RunId) -> Option<mq_protocol::MQRunInfo> {
+        self.0.lock().unwrap().get_run(run_id)
     }
 
-    fn list_jobs(&self, limit: Option<usize>) -> Vec<mq_protocol::MQJobInfo> {
-        self.0.lock().unwrap().list_jobs(limit)
+    fn list_runs(&self, limit: Option<usize>) -> Vec<mq_protocol::MQRunInfo> {
+        self.0.lock().unwrap().list_runs(limit)
     }
 
     fn root_dir(&self) -> PathBuf {
@@ -702,14 +765,12 @@ fn run_daemon_loop(
         base_branch: base_branch.clone(),
         merge_style: merged_config.merge_style,
         hooks: merged_config.hooks,
-        next_job_id: 1,
-        queued: HashMap::new(),
-        active: HashMap::new(),
-        completed: Vec::new(),
+        next_run_id: mq_protocol::RunId(1),
+        runs: HashMap::new(),
     });
 
     // Create channel for queueing jobs
-    let (mq_jobs_sender, mq_jobs_receiver) = mpsc::channel::<u64>();
+    let (mq_jobs_sender, mq_jobs_receiver) = mpsc::channel::<mq_protocol::RunId>();
 
     // Spawn worker thread to process queue
     let state_clone = state.clone();
@@ -734,10 +795,10 @@ fn run_daemon_loop(
         match accepted {
             Ok((mut stream, _)) => {
                 let state_clone = state.clone();
-                let mq_jobs_sender_clone = mq_jobs_sender.clone();
+                let mq_runs_sender_clone = mq_jobs_sender.clone();
                 std::thread::spawn(move || {
                     if let Ok(request) = mq_protocol::read_mq_request(&mut stream) {
-                        let response = handle_request(&state_clone, request, mq_jobs_sender_clone);
+                        let response = handle_request(&state_clone, request, mq_runs_sender_clone);
                         let _ = mq_protocol::write_mq_response(&mut stream, response);
                     }
                 });
@@ -754,7 +815,7 @@ fn run_daemon_loop(
 fn handle_request(
     state: &SharedMQState,
     request: mq_protocol::MQRequest,
-    mq_jobs_sender: mpsc::Sender<u64>,
+    mq_runs_sender: mpsc::Sender<mq_protocol::RunId>,
 ) -> mq_protocol::MQResponse {
     match request {
         mq_protocol::MQRequest::Hello => mq_protocol::MQResponse::HelloAck,
@@ -782,32 +843,32 @@ fn handle_request(
                     }
                 };
 
-            let job = state.queue_job(resolved_candidate.clone(), no_merge);
-            let job_id = job.id;
+            let run = state.queue_run(resolved_candidate.clone(), no_merge);
+            let run_id = run.id;
 
             debug!(
                 candidate_user = %resolved_candidate.user,
                 candidate_commit = %resolved_candidate.commit_id,
-                job_id,
+                run_id = %run_id,
                 no_merge,
                 "Added candidate to queue"
             );
 
-            // Send job ID to process_queue
-            match mq_jobs_sender.send(job_id) {
-                Ok(_) => mq_protocol::MQResponse::CandidateAdded { job_id },
-                Err(e) => mq_protocol::MQResponse::Error(format!("Failed to queue job: {}", e)),
+            // Send run ID to process_queue
+            match mq_runs_sender.send(run_id) {
+                Ok(_) => mq_protocol::MQResponse::CandidateAdded { run_id },
+                Err(e) => mq_protocol::MQResponse::Error(format!("Failed to queue run: {}", e)),
             }
         }
 
         mq_protocol::MQRequest::List { limit } => {
-            let jobs = state.list_jobs(limit);
-            mq_protocol::MQResponse::JobList { jobs }
+            let runs = state.list_runs(limit);
+            mq_protocol::MQResponse::RunList { runs }
         }
 
-        mq_protocol::MQRequest::GetStatus { job_id } => {
-            let job = state.get_job(job_id);
-            mq_protocol::MQResponse::JobStatus { job }
+        mq_protocol::MQRequest::GetStatus { run_id } => {
+            let run = state.get_run(run_id);
+            mq_protocol::MQResponse::RunStatus { run }
         }
     }
 }
@@ -972,7 +1033,11 @@ fn run_hook_interactive(
     }
 }
 
-fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc::Receiver<u64>) {
+fn process_queue(
+    state: SharedMQState,
+    root_dir: PathBuf,
+    mq_runs_receiver: mpsc::Receiver<mq_protocol::RunId>,
+) {
     // Get VCS once at the start
     let vcs = match get_vcs(&root_dir, None) {
         Ok(v) => v,
@@ -983,28 +1048,28 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
     };
 
     loop {
-        // Wait for next job ID from channel
-        let job_id = match mq_jobs_receiver.recv() {
+        // Wait for next run ID from channel
+        let run_id = match mq_runs_receiver.recv() {
             Ok(id) => id,
             Err(_) => {
-                debug!("MQ jobs channel closed, exiting process_queue");
+                debug!("MQ runs channel closed, exiting process_queue");
                 break;
             }
         };
 
-        // Move job from queued to active and get hooks and merge_style
-        let (mut job_info, hooks, merge_style) = match state.start_job(job_id) {
+        // Move run from queued to active and get hooks, merge_style, and shared job states
+        let (mut run_info, hooks, merge_style, shared_job_states) = match state.start_run(run_id) {
             Some(result) => result,
             None => {
-                debug!("Job {} not found in queued map", job_id);
+                debug!("Run {} not found in queued map", run_id);
                 continue;
             }
         };
 
         debug!(
-            job_id = job_info.id,
-            candidate_user = %job_info.candidate.user,
-            candidate_commit = %job_info.candidate.commit_id,
+            run_id = %run_info.id,
+            candidate_user = %run_info.candidate.user,
+            candidate_commit = %run_info.candidate.commit_id,
             "Processing MQ candidate check"
         );
 
@@ -1012,9 +1077,9 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
         let base_branch = state.base_branch();
 
         // Create candidate environment for hooks (before test merge, no merged info yet)
-        let candidate_commit_id = job_info.candidate.commit_id.to_string();
-        let candidate_change_id = job_info.candidate.change_id.to_string();
-        let candidate_id = job_info.candidate.user.to_string();
+        let candidate_commit_id = run_info.candidate.commit_id.to_string();
+        let candidate_change_id = run_info.candidate.change_id.to_string();
+        let candidate_id = run_info.candidate.user.to_string();
         let candidate_env_pre_merge = CandidateHookEnv {
             candidate_commit_id: &candidate_commit_id,
             candidate_change_id: &candidate_change_id,
@@ -1033,15 +1098,15 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
             Some(&candidate_env_pre_merge),
         );
         if !pre_clone_result.output.is_empty() {
-            job_info.output.push_str("### Pre-Clone Hook\n\n");
-            job_info.output.push_str(&pre_clone_result.output);
-            job_info.output.push('\n');
+            run_info.output.push_str("### Pre-Clone Hook\n\n");
+            run_info.output.push_str(&pre_clone_result.output);
+            run_info.output.push('\n');
         }
         if !pre_clone_result.success {
-            job_info.status = mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::PreClone);
-            job_info.output.push_str("\nPre-clone hook failed\n");
-            job_info.completed_at = Some(SystemTime::now());
-            state.complete_job(job_id, job_info);
+            run_info.status = mq_protocol::MQRunStatus::Failed(mq_protocol::FailedReason::PreClone);
+            run_info.output.push_str("\nPre-clone hook failed\n");
+            run_info.completed_at = Some(SystemTime::now());
+            state.complete_run(run_id, run_info);
             continue;
         }
 
@@ -1050,41 +1115,41 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
         {
             Ok(r) => r,
             Err(e) => {
-                job_info.status =
-                    mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::BaseResolve);
-                job_info.output.push_str(&format!(
+                run_info.status =
+                    mq_protocol::MQRunStatus::Failed(mq_protocol::FailedReason::BaseResolve);
+                run_info.output.push_str(&format!(
                     "Failed to resolve base branch '{}': {}",
                     base_branch, e
                 ));
-                job_info.completed_at = Some(SystemTime::now());
-                state.complete_job(job_id, job_info);
+                run_info.completed_at = Some(SystemTime::now());
+                state.complete_run(run_id, run_info);
                 continue;
             }
         };
 
         // Create test merge/rebase of candidate onto base for CI testing
         let test_merge_result =
-            match create_test_merge(&root_dir, &base_branch, &job_info.candidate, &merge_style) {
+            match create_test_merge(&root_dir, &base_branch, &run_info.candidate, &merge_style) {
                 Ok(result) => result,
                 Err(e) => {
                     let fail_reason = match merge_style {
                         selfci::config::MergeStyle::Rebase => mq_protocol::FailedReason::TestRebase,
                         selfci::config::MergeStyle::Merge => mq_protocol::FailedReason::TestMerge,
                     };
-                    job_info.status = mq_protocol::MQJobStatus::Failed(fail_reason);
-                    job_info.output.push_str(&format!(
+                    run_info.status = mq_protocol::MQRunStatus::Failed(fail_reason);
+                    run_info.output.push_str(&format!(
                         "Failed to create test merge/rebase of candidate onto base: {}",
                         e
                     ));
-                    job_info.completed_at = Some(SystemTime::now());
-                    state.complete_job(job_id, job_info);
+                    run_info.completed_at = Some(SystemTime::now());
+                    state.complete_run(run_id, run_info);
                     continue;
                 }
             };
 
         // Store the test merge output and style in the job info
-        job_info.merge_style = Some(merge_style.clone());
-        job_info.test_merge_output = test_merge_result.output.clone();
+        run_info.merge_style = Some(merge_style);
+        run_info.test_merge_output = test_merge_result.output.clone();
 
         // Use the merged commit for CI testing
         let merged_commit_id = test_merge_result.commit_id.to_string();
@@ -1118,7 +1183,7 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
 
         // Create a ResolvedRevision for the merged commit (keeping original user string for display)
         let merged_candidate = selfci::revision::ResolvedRevision {
-            user: job_info.candidate.user.clone(),
+            user: run_info.candidate.user.clone(),
             commit_id: test_merge_result.commit_id,
             change_id: test_merge_result.change_id,
         };
@@ -1156,25 +1221,26 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
             None,
             super::check::CheckMode::MergeQueue,
             post_clone_hook,
-            Some(&job_info.candidate), // Original candidate for SELFCI_CANDIDATE_* env vars
+            Some(&run_info.candidate), // Original candidate for SELFCI_CANDIDATE_* env vars
+            Some(&shared_job_states),
         ) {
             Ok(result) => {
                 // Handle post-clone hook output if present
                 if let Some(output) = &result.post_clone_output
                     && !output.is_empty()
                 {
-                    job_info.output.push_str("### Post-Clone Hook\n\n");
-                    job_info.output.push_str(output);
-                    job_info.output.push('\n');
+                    run_info.output.push_str("### Post-Clone Hook\n\n");
+                    run_info.output.push_str(output);
+                    run_info.output.push('\n');
                 }
 
                 // Check if post-clone hook failed
                 if result.post_clone_success == Some(false) {
-                    job_info.status =
-                        mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::PostClone);
-                    job_info.output.push_str("\nPost-clone hook failed\n");
-                    job_info.completed_at = Some(SystemTime::now());
-                    state.complete_job(job_id, job_info);
+                    run_info.status =
+                        mq_protocol::MQRunStatus::Failed(mq_protocol::FailedReason::PostClone);
+                    run_info.output.push_str("\nPost-clone hook failed\n");
+                    run_info.completed_at = Some(SystemTime::now());
+                    state.complete_run(run_id, run_info);
                     continue;
                 }
 
@@ -1195,23 +1261,23 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                 let check_output = result.output.clone();
 
                 // Append check output to job output (preserving hook outputs)
-                job_info.output.push_str(&result.output);
-                job_info.steps = result.steps;
-                job_info.completed_at = Some(SystemTime::now());
+                run_info.output.push_str(&result.output);
+                run_info.active_jobs = Vec::new(); // Active jobs list is only populated for status queries
+                run_info.completed_at = Some(SystemTime::now());
 
                 if job_passed {
                     // Merge into base branch if no_merge is false
-                    if job_info.no_merge {
+                    if run_info.no_merge {
                         debug!(
                             "MQ candidate check {} passed (no-merge mode, skipping merge)",
-                            job_info.id
+                            run_info.id
                         );
-                        job_info.status =
-                            mq_protocol::MQJobStatus::Passed(mq_protocol::PassedReason::NoMerge);
+                        run_info.status =
+                            mq_protocol::MQRunStatus::Passed(mq_protocol::PassedReason::NoMerge);
                     } else {
                         debug!(
                             "MQ candidate check {} passed, merging into {}",
-                            job_info.id, base_branch
+                            run_info.id, base_branch
                         );
 
                         // Run pre-merge hook if configured
@@ -1223,15 +1289,15 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                             Some(&candidate_env_post_merge),
                         );
                         if !pre_merge_result.output.is_empty() {
-                            job_info.output.push_str("\n\n### Pre-Merge Hook\n\n");
-                            job_info.output.push_str(&pre_merge_result.output);
+                            run_info.output.push_str("\n\n### Pre-Merge Hook\n\n");
+                            run_info.output.push_str(&pre_merge_result.output);
                         }
 
                         if !pre_merge_result.success {
-                            job_info
+                            run_info
                                 .output
                                 .push_str("\n\nPre-merge hook failed, skipping merge\n");
-                            job_info.status = mq_protocol::MQJobStatus::Failed(
+                            run_info.status = mq_protocol::MQRunStatus::Failed(
                                 mq_protocol::FailedReason::PreMerge,
                             );
                         } else {
@@ -1240,14 +1306,14 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                             match merge_candidate(
                                 &root_dir,
                                 &base_branch,
-                                &job_info.candidate,
+                                &run_info.candidate,
                                 &check_output,
                                 &merge_style,
                             ) {
                                 Ok(merge_log) => {
                                     // Append merge output with separator
-                                    job_info.output.push_str("\n\n### Merge Output\n\n");
-                                    job_info.output.push_str(&merge_log);
+                                    run_info.output.push_str("\n\n### Merge Output\n\n");
+                                    run_info.output.push_str(&merge_log);
 
                                     // Run post-merge hook if configured
                                     // Uses post-merge env (has merged info)
@@ -1258,25 +1324,25 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                                         Some(&candidate_env_post_merge),
                                     );
                                     if !post_merge_result.output.is_empty() {
-                                        job_info.output.push_str("\n\n### Post-Merge Hook\n\n");
-                                        job_info.output.push_str(&post_merge_result.output);
+                                        run_info.output.push_str("\n\n### Post-Merge Hook\n\n");
+                                        run_info.output.push_str(&post_merge_result.output);
                                     }
 
                                     if !post_merge_result.success {
-                                        job_info.output.push_str("\n\nPost-merge hook failed\n");
+                                        run_info.output.push_str("\n\nPost-merge hook failed\n");
                                         // Note: merge already happened, so we still report success
                                         // but log the hook failure
                                     }
 
-                                    job_info.status = mq_protocol::MQJobStatus::Passed(
+                                    run_info.status = mq_protocol::MQRunStatus::Passed(
                                         mq_protocol::PassedReason::Merged,
                                     );
                                 }
                                 Err(e) => {
-                                    job_info
+                                    run_info
                                         .output
                                         .push_str(&format!("\n\n### Merge Failed\n\n{}", e));
-                                    job_info.status = mq_protocol::MQJobStatus::Failed(
+                                    run_info.status = mq_protocol::MQRunStatus::Failed(
                                         mq_protocol::FailedReason::Merge,
                                     );
                                 }
@@ -1284,22 +1350,22 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                         }
                     }
                 } else {
-                    job_info.status =
-                        mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::Check);
-                    debug!("MQ candidate check {} failed", job_info.id);
+                    run_info.status =
+                        mq_protocol::MQRunStatus::Failed(mq_protocol::FailedReason::Check);
+                    debug!("MQ candidate check {} failed", run_info.id);
                 }
             }
             Err(e) => {
-                job_info.status =
-                    mq_protocol::MQJobStatus::Failed(mq_protocol::FailedReason::Check);
-                job_info.output = format!("Check failed: {}", e);
-                job_info.completed_at = Some(SystemTime::now());
-                debug!("MQ candidate check {} failed: {}", job_info.id, e);
+                run_info.status =
+                    mq_protocol::MQRunStatus::Failed(mq_protocol::FailedReason::Check);
+                run_info.output = format!("Check failed: {}", e);
+                run_info.completed_at = Some(SystemTime::now());
+                debug!("MQ candidate check {} failed: {}", run_info.id, e);
             }
         }
 
         // Move job from active to completed
-        state.complete_job(job_id, job_info);
+        state.complete_run(run_id, run_info);
     }
 }
 
@@ -2271,14 +2337,14 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
     })?;
 
     match response {
-        mq_protocol::MQResponse::CandidateAdded { job_id } => {
+        mq_protocol::MQResponse::CandidateAdded { run_id } => {
             if no_merge {
                 println!(
-                    "Added to merge queue with job ID: {} (no-merge mode)",
-                    job_id
+                    "Added to merge queue with run ID: {} (no-merge mode)",
+                    run_id
                 );
             } else {
-                println!("Added to merge queue with job ID: {}", job_id);
+                println!("Added to merge queue with run ID: {}", run_id);
             }
             Ok(())
         }
@@ -2293,7 +2359,7 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
     }
 }
 
-pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
+pub fn list_runs(limit: Option<usize>) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
     let daemon_dir = get_project_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
@@ -2311,31 +2377,31 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
             })?;
 
     match response {
-        mq_protocol::MQResponse::JobList { jobs } => {
-            if jobs.is_empty() {
-                println!("No jobs in queue");
+        mq_protocol::MQResponse::RunList { runs } => {
+            if runs.is_empty() {
+                println!("No runs in queue");
             } else {
                 println!(
                     "{:<6} {:<20} {:<12} {:<10} {:<20} {:<20}",
                     "ID", "Status", "Change", "Commit", "Candidate", "Queued"
                 );
                 println!("{}", "-".repeat(92));
-                for job in jobs {
-                    let status = job.status.display();
+                for run in runs {
+                    let status = run.status.display();
 
-                    let queued = humantime::format_rfc3339_seconds(job.queued_at);
+                    let queued = humantime::format_rfc3339_seconds(run.queued_at);
                     // Shorten change_id and commit_id to first 8 chars
-                    let change_short = &job.candidate.change_id.as_str()
-                        [..job.candidate.change_id.as_str().len().min(8)];
-                    let commit_short = &job.candidate.commit_id.as_str()
-                        [..job.candidate.commit_id.as_str().len().min(8)];
+                    let change_short = &run.candidate.change_id.as_str()
+                        [..run.candidate.change_id.as_str().len().min(8)];
+                    let commit_short = &run.candidate.commit_id.as_str()
+                        [..run.candidate.commit_id.as_str().len().min(8)];
                     println!(
                         "{:<6} {:<20} {:<12} {:<10} {:<20} {:<20}",
-                        job.id,
+                        run.id,
                         status,
                         change_short,
                         commit_short,
-                        job.candidate.user.as_str(),
+                        run.candidate.user.as_str(),
                         queued
                     );
                 }
@@ -2353,7 +2419,7 @@ pub fn list_jobs(limit: Option<usize>) -> Result<(), MainError> {
     }
 }
 
-pub fn get_status(job_id: u64) -> Result<(), MainError> {
+pub fn get_status(run_id: u64) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
     let daemon_dir = get_project_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
@@ -2363,59 +2429,81 @@ pub fn get_status(job_id: u64) -> Result<(), MainError> {
 
     let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
+    let run_id = mq_protocol::RunId(run_id);
     let response =
-        mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::GetStatus { job_id })
+        mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::GetStatus { run_id })
             .map_err(|e| {
                 eprintln!("Error: {}", e);
                 MainError::CheckFailed
             })?;
 
     match response {
-        mq_protocol::MQResponse::JobStatus { job: Some(job) } => {
-            println!("Run ID: {}", job.id);
+        mq_protocol::MQResponse::RunStatus { run: Some(run) } => {
+            println!("Run ID: {}", run.id);
             println!(
                 "Candidate: {} (commit: {})",
-                job.candidate.user, job.candidate.commit_id
+                run.candidate.user, run.candidate.commit_id
             );
-            println!("Status: {}", job.status.display());
+            println!("Status: {}", run.status.display());
             println!(
                 "Queued at: {}",
-                humantime::format_rfc3339_seconds(job.queued_at)
+                humantime::format_rfc3339_seconds(run.queued_at)
             );
 
-            if let Some(started_at) = job.started_at {
+            if let Some(started_at) = run.started_at {
                 println!(
                     "Started at: {}",
                     humantime::format_rfc3339_seconds(started_at)
                 );
+
+                // Show active jobs if the run is still running
+                if matches!(run.status, mq_protocol::MQRunStatus::Running) {
+                    let now = std::time::SystemTime::now();
+                    let active: Vec<_> = run
+                        .active_jobs
+                        .iter()
+                        .filter(|job| matches!(job.status, protocol::StepStatus::Running))
+                        .collect();
+
+                    if !active.is_empty() {
+                        let active_strs: Vec<String> = active
+                            .iter()
+                            .map(|job| {
+                                let elapsed = now.duration_since(job.ts).unwrap_or_default();
+                                format!("{} ({:.3}s)", job.name, elapsed.as_secs_f64())
+                            })
+                            .collect();
+                        println!("Active Jobs: {}", active_strs.join(", "));
+                    }
+                }
             }
 
-            if let Some(completed_at) = job.completed_at {
+            if let Some(completed_at) = run.completed_at {
                 println!(
                     "Completed at: {}",
                     humantime::format_rfc3339_seconds(completed_at)
                 );
             }
 
-            if !job.test_merge_output.is_empty() {
-                let header = match job.merge_style {
+            if !run.test_merge_output.is_empty() {
+                let header = match run.merge_style {
                     Some(selfci::config::MergeStyle::Rebase) => "### Test Rebase",
                     Some(selfci::config::MergeStyle::Merge) => "### Test Merge",
                     None => "### Test Merge/Rebase",
                 };
                 println!("\n{}\n", header);
-                println!("{}", job.test_merge_output);
+                println!("{}", run.test_merge_output);
             }
 
-            if !job.output.is_empty() {
+            if !run.output.is_empty() {
                 println!("\n### Check Output\n");
-                println!("{}", job.output);
+                println!("{}", run.output);
             }
 
             Ok(())
         }
-        mq_protocol::MQResponse::JobStatus { job: None } => {
-            eprintln!("Job {} not found", job_id);
+        mq_protocol::MQResponse::RunStatus { run: None } => {
+            eprintln!("Run {} not found", run_id);
             Err(MainError::CheckFailed)
         }
         mq_protocol::MQResponse::Error(e) => {

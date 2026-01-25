@@ -257,18 +257,18 @@ fn main_inner() -> Result<(), MainError> {
                 cmd::mq::add_candidate(candidate, true)?;
             }
             Some(opts::MQCommands::List { limit }) => {
-                cmd::mq::list_jobs(limit)?;
+                cmd::mq::list_runs(limit)?;
             }
             None => {
-                // If run_id provided, show status; otherwise list jobs
+                // If run_id provided, show status; otherwise list runs
                 if let Some(id) = run_id {
                     cmd::mq::get_status(id)?;
                 } else {
-                    cmd::mq::list_jobs(None)?;
+                    cmd::mq::list_runs(None)?;
                 }
             }
-            Some(opts::MQCommands::Status { run_id: job_id }) => {
-                cmd::mq::get_status(job_id)?;
+            Some(opts::MQCommands::Status { run_id }) => {
+                cmd::mq::get_status(run_id)?;
             }
             Some(opts::MQCommands::Stop) => {
                 cmd::mq::stop_daemon()?;

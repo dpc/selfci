@@ -152,7 +152,7 @@ impl MergedMQConfig {
         let mut result = if let Some(mq) = main_mq {
             MergedMQConfig {
                 base_branch: mq.base_branch.clone(),
-                merge_style: mq.merge_style.clone(),
+                merge_style: mq.merge_style,
                 hooks: mq.hooks.clone(),
             }
         } else {

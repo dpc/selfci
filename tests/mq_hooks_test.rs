@@ -187,7 +187,7 @@ fn test_mq_hooks_execution() {
     // Extract job ID
     let job_id: u64 = output
         .lines()
-        .find(|l| l.contains("job ID"))
+        .find(|l| l.contains("run ID"))
         .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to extract job ID");
@@ -395,7 +395,7 @@ mq:
 
     let job_id: u64 = output
         .lines()
-        .find(|l| l.contains("job ID"))
+        .find(|l| l.contains("run ID"))
         .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to extract job ID");
@@ -525,7 +525,7 @@ mq:
 
     let job_id: u64 = output
         .lines()
-        .find(|l| l.contains("job ID"))
+        .find(|l| l.contains("run ID"))
         .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to extract job ID");
@@ -982,7 +982,7 @@ mq:
 
     let job_id: u64 = output
         .lines()
-        .find(|l| l.contains("job ID"))
+        .find(|l| l.contains("run ID"))
         .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
         .expect("Failed to extract job ID");

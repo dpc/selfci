@@ -7,16 +7,26 @@ use std::time::SystemTime;
 use crate::protocol::StepLogEntry;
 use crate::revision::ResolvedRevision;
 
-/// Reason why a job passed
+/// Unique identifier for an MQ run (a candidate submitted via `selfci mq add`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RunId(pub u64);
+
+impl std::fmt::Display for RunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Reason why a run passed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PassedReason {
-    /// Job passed and was merged into base branch
+    /// Run passed and was merged into base branch
     Merged,
-    /// Job passed but merge was skipped (--no-merge flag)
+    /// Run passed but merge was skipped (--no-merge flag)
     NoMerge,
 }
 
-/// Reason why a job failed
+/// Reason why a run failed
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FailedReason {
     /// Pre-clone hook failed
@@ -37,28 +47,29 @@ pub enum FailedReason {
     BaseResolve,
 }
 
+/// Status of an MQ run
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MQJobStatus {
+pub enum MQRunStatus {
     Queued,
     Running,
     Passed(PassedReason),
     Failed(FailedReason),
 }
 
-impl MQJobStatus {
+impl MQRunStatus {
     /// Format the status for display
     pub fn display(&self) -> String {
         match self {
-            MQJobStatus::Queued => "Queued".to_string(),
-            MQJobStatus::Running => "Running".to_string(),
-            MQJobStatus::Passed(reason) => {
+            MQRunStatus::Queued => "Queued".to_string(),
+            MQRunStatus::Running => "Running".to_string(),
+            MQRunStatus::Passed(reason) => {
                 let reason_str = match reason {
                     PassedReason::Merged => "merged",
                     PassedReason::NoMerge => "no-merge",
                 };
                 format!("Passed: {}", reason_str)
             }
-            MQJobStatus::Failed(reason) => {
+            MQRunStatus::Failed(reason) => {
                 let reason_str = match reason {
                     FailedReason::PreClone => "pre-clone",
                     FailedReason::PostClone => "post-clone",
@@ -76,20 +87,21 @@ impl MQJobStatus {
 
     /// Check if status represents a passed state
     pub fn is_passed(&self) -> bool {
-        matches!(self, MQJobStatus::Passed(_))
+        matches!(self, MQRunStatus::Passed(_))
     }
 
     /// Check if status represents a failed state
     pub fn is_failed(&self) -> bool {
-        matches!(self, MQJobStatus::Failed(_))
+        matches!(self, MQRunStatus::Failed(_))
     }
 }
 
+/// Information about an MQ run
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MQJobInfo {
-    pub id: u64,
+pub struct MQRunInfo {
+    pub id: RunId,
     pub candidate: ResolvedRevision,
-    pub status: MQJobStatus,
+    pub status: MQRunStatus,
     pub queued_at: SystemTime,
     pub started_at: Option<SystemTime>,
     pub completed_at: Option<SystemTime>,
@@ -99,7 +111,8 @@ pub struct MQJobInfo {
     pub test_merge_output: String,
     /// Output from the check command
     pub output: String,
-    pub steps: Vec<StepLogEntry>,
+    /// Active jobs within this run (for display purposes)
+    pub active_jobs: Vec<StepLogEntry>,
     pub no_merge: bool,
 }
 
@@ -108,15 +121,15 @@ pub enum MQRequest {
     Hello,
     AddCandidate { candidate: String, no_merge: bool },
     List { limit: Option<usize> },
-    GetStatus { job_id: u64 },
+    GetStatus { run_id: RunId },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MQResponse {
     HelloAck,
-    CandidateAdded { job_id: u64 },
-    JobList { jobs: Vec<MQJobInfo> },
-    JobStatus { job: Option<MQJobInfo> },
+    CandidateAdded { run_id: RunId },
+    RunList { runs: Vec<MQRunInfo> },
+    RunStatus { run: Option<MQRunInfo> },
     Error(String),
 }
 

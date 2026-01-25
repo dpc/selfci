@@ -61,15 +61,15 @@ fn wait_for_daemon_ready_with_env(repo_path: &Path, runtime_dir: &Path, timeout_
     );
 }
 
-/// Helper to wait for job completion
-fn wait_for_job_completion(repo_path: &Path, job_id: u64, timeout_secs: u64) -> bool {
+/// Helper to wait for run completion
+fn wait_for_run_completion(repo_path: &Path, run_id: u64, timeout_secs: u64) -> bool {
     let start = std::time::Instant::now();
     loop {
         if start.elapsed().as_secs() > timeout_secs {
             return false;
         }
 
-        let output = cmd!(selfci_bin(), "mq", "status", job_id.to_string())
+        let output = cmd!(selfci_bin(), "mq", "status", run_id.to_string())
             .dir(repo_path)
             .read()
             .ok();
@@ -84,14 +84,14 @@ fn wait_for_job_completion(repo_path: &Path, job_id: u64, timeout_secs: u64) -> 
     }
 }
 
-/// Extract job ID from mq add output
-fn extract_job_id(output: &str) -> u64 {
+/// Extract run ID from mq add output
+fn extract_run_id(output: &str) -> u64 {
     output
         .lines()
-        .find(|l| l.contains("job ID"))
+        .find(|l| l.contains("run ID"))
         .and_then(|l| l.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
-        .expect("Failed to extract job ID")
+        .expect("Failed to extract run ID")
 }
 
 /// Setup a base Git repository with just main branch and initial commit
@@ -501,27 +501,27 @@ fn run_git_merge_test(merge_style: &str, num_candidates: usize) {
         .unwrap();
     wait_for_daemon_ready(repo_path, 10);
 
-    // Add all candidates and collect job IDs
-    let mut job_ids = Vec::new();
+    // Add all candidates and collect run IDs
+    let mut run_ids = Vec::new();
     for commit in &candidates {
         let output = cmd!(selfci_bin(), "mq", "add", commit)
             .dir(repo_path)
             .read()
             .unwrap();
-        let job_id = extract_job_id(&output);
-        job_ids.push(job_id);
-        eprintln!("Added candidate {} as job {}", &commit[..8], job_id);
+        let run_id = extract_run_id(&output);
+        run_ids.push(run_id);
+        eprintln!("Added candidate {} as run {}", &commit[..8], run_id);
     }
 
-    // Wait for all jobs to complete in order
-    for (i, job_id) in job_ids.iter().enumerate() {
+    // Wait for all runs to complete in order
+    for (i, run_id) in run_ids.iter().enumerate() {
         assert!(
-            wait_for_job_completion(repo_path, *job_id, 30),
+            wait_for_run_completion(repo_path, *run_id, 30),
             "Job {} (candidate {}) did not complete successfully",
-            job_id,
+            run_id,
             i + 1
         );
-        eprintln!("Job {} (candidate {}) completed", job_id, i + 1);
+        eprintln!("Job {} (candidate {}) completed", run_id, i + 1);
     }
 
     // Stop daemon
@@ -564,8 +564,8 @@ fn run_jj_merge_test(merge_style: &str, num_candidates: usize) {
         .unwrap();
     wait_for_daemon_ready(repo_path, 10);
 
-    // Add all candidates and collect job IDs
-    let mut job_ids = Vec::new();
+    // Add all candidates and collect run IDs
+    let mut run_ids = Vec::new();
     for commit in &candidates {
         let output = cmd!(selfci_bin(), "mq", "add", commit)
             .dir(repo_path)
@@ -574,20 +574,20 @@ fn run_jj_merge_test(merge_style: &str, num_candidates: usize) {
             .env("JJ_EMAIL", "test@example.com")
             .read()
             .unwrap();
-        let job_id = extract_job_id(&output);
-        job_ids.push(job_id);
-        eprintln!("Added candidate {} as job {}", &commit[..8], job_id);
+        let run_id = extract_run_id(&output);
+        run_ids.push(run_id);
+        eprintln!("Added candidate {} as run {}", &commit[..8], run_id);
     }
 
-    // Wait for all jobs to complete in order
-    for (i, job_id) in job_ids.iter().enumerate() {
+    // Wait for all runs to complete in order
+    for (i, run_id) in run_ids.iter().enumerate() {
         assert!(
-            wait_for_job_completion(repo_path, *job_id, 30),
+            wait_for_run_completion(repo_path, *run_id, 30),
             "Job {} (candidate {}) did not complete successfully",
-            job_id,
+            run_id,
             i + 1
         );
-        eprintln!("Job {} (candidate {}) completed", job_id, i + 1);
+        eprintln!("Job {} (candidate {}) completed", run_id, i + 1);
     }
 
     // Stop daemon
@@ -1068,15 +1068,15 @@ fn test_mq_explicit_runtime_dir() {
     let pid: u32 = pid_str.trim().parse().expect("pid should be a number");
     assert!(pid > 0, "pid should be positive");
 
-    // Test list command (should show no jobs initially)
+    // Test list command (should show no runs initially)
     let list_output = cmd!(selfci_bin(), "mq", "list")
         .dir(repo_path)
         .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
         .read()
         .unwrap();
     assert!(
-        list_output.contains("No jobs"),
-        "should show no jobs initially"
+        list_output.contains("No runs"),
+        "should show no runs initially"
     );
 
     // Create a feature branch and add it to the queue
@@ -1098,12 +1098,12 @@ fn test_mq_explicit_runtime_dir() {
         .read()
         .unwrap();
     assert!(
-        add_output.contains("job ID: 1"),
-        "should add candidate with job ID 1: {}",
+        add_output.contains("run ID: 1"),
+        "should add candidate with run ID 1: {}",
         add_output
     );
 
-    // Wait a moment for the job to be processed
+    // Wait a moment for the run to be processed
     thread::sleep(Duration::from_millis(500));
 
     // Test status command
@@ -1114,19 +1114,19 @@ fn test_mq_explicit_runtime_dir() {
         .unwrap();
     assert!(
         status_output.contains("Run ID: 1"),
-        "status should show job 1: {}",
+        "status should show run 1: {}",
         status_output
     );
 
-    // List should now show the job
+    // List should now show the run
     let list_output = cmd!(selfci_bin(), "mq", "list")
         .dir(repo_path)
         .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
         .read()
         .unwrap();
     assert!(
-        !list_output.contains("No jobs"),
-        "should show jobs after adding: {}",
+        !list_output.contains("No runs"),
+        "should show runs after adding: {}",
         list_output
     );
 

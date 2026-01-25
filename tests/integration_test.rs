@@ -506,50 +506,50 @@ job:
 
     println!("Add failing candidate output:\n{}", add_output);
 
-    // Extract job ID from output (format: "Added to merge queue with job ID: 1")
-    let failing_job_id: u64 = add_output
+    // Extract run ID from output (format: "Added to merge queue with run ID: 1")
+    let failing_run_id: u64 = add_output
         .lines()
-        .find(|line| line.contains("job ID"))
+        .find(|line| line.contains("run ID"))
         .and_then(|line| line.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
-        .expect("Failed to parse job ID");
+        .expect("Failed to parse run ID");
 
-    println!("Failing job ID: {}", failing_job_id);
+    println!("Failing run ID: {}", failing_run_id);
 
-    // Wait for job to complete (poll status)
+    // Wait for run to complete (poll status)
     let mut attempts = 0;
     let max_attempts = 50;
-    let job_status;
+    let run_status;
 
     loop {
         thread::sleep(Duration::from_millis(200));
         attempts += 1;
 
-        let status_output = cmd!(selfci_bin, "mq", "status", failing_job_id.to_string())
+        let status_output = cmd!(selfci_bin, "mq", "status", failing_run_id.to_string())
             .dir(repo_path)
             .env("SELFCI_VCS_FORCE", "git")
             .read()
             .expect("Failed to get status");
 
         if status_output.contains("Status: Failed") || status_output.contains("Status: Passed") {
-            job_status = status_output;
+            run_status = status_output;
             break;
         }
 
         if attempts >= max_attempts {
-            panic!("Job did not complete within expected time");
+            panic!("Run did not complete within expected time");
         }
     }
 
-    println!("Failing job status:\n{}", job_status);
+    println!("Failing run status:\n{}", run_status);
 
-    // Verify job failed
+    // Verify run failed
     assert!(
-        job_status.contains("Status: Failed"),
-        "Job should have failed"
+        run_status.contains("Status: Failed"),
+        "Run should have failed"
     );
     assert!(
-        job_status.contains("FORBIDDEN") || job_status.contains("forbidden"),
+        run_status.contains("FORBIDDEN") || run_status.contains("forbidden"),
         "Output should mention the forbidden string"
     );
 
@@ -575,48 +575,48 @@ job:
 
     println!("Add passing candidate output:\n{}", add_output);
 
-    let passing_job_id: u64 = add_output
+    let passing_run_id: u64 = add_output
         .lines()
-        .find(|line| line.contains("job ID"))
+        .find(|line| line.contains("run ID"))
         .and_then(|line| line.split(':').next_back())
         .and_then(|s| s.trim().parse().ok())
-        .expect("Failed to parse job ID");
+        .expect("Failed to parse run ID");
 
-    println!("Passing job ID: {}", passing_job_id);
+    println!("Passing run ID: {}", passing_run_id);
 
-    // Wait for passing job to complete
+    // Wait for passing run to complete
     attempts = 0;
-    let passing_job_status;
+    let passing_run_status;
 
     loop {
         thread::sleep(Duration::from_millis(200));
         attempts += 1;
 
-        let status_output = cmd!(selfci_bin, "mq", "status", passing_job_id.to_string())
+        let status_output = cmd!(selfci_bin, "mq", "status", passing_run_id.to_string())
             .dir(repo_path)
             .env("SELFCI_VCS_FORCE", "git")
             .read()
             .expect("Failed to get status");
 
         if status_output.contains("Status: Failed") || status_output.contains("Status: Passed") {
-            passing_job_status = status_output;
+            passing_run_status = status_output;
             break;
         }
 
         if attempts >= max_attempts {
-            panic!("Passing job did not complete within expected time");
+            panic!("Passing run did not complete within expected time");
         }
     }
 
-    println!("Passing job status:\n{}", passing_job_status);
+    println!("Passing run status:\n{}", passing_run_status);
 
-    // Verify job passed
+    // Verify run passed
     assert!(
-        passing_job_status.contains("Status: Passed"),
-        "Job should have passed"
+        passing_run_status.contains("Status: Passed"),
+        "Run should have passed"
     );
     assert!(
-        passing_job_status.contains("Check passed!"),
+        passing_run_status.contains("Check passed!"),
         "Output should show success message"
     );
 

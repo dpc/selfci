@@ -239,7 +239,10 @@ mod tests {
     #[test]
     fn test_command_with_path_arg() {
         let cmd = Cmd::new("git").args(["worktree", "add", "--detach", "/tmp/foo", "abc123"]);
-        assert_eq!(format!("{}", cmd), "git worktree add --detach /tmp/foo abc123");
+        assert_eq!(
+            format!("{}", cmd),
+            "git worktree add --detach /tmp/foo abc123"
+        );
     }
 
     #[test]
@@ -256,7 +259,9 @@ mod tests {
 
     #[test]
     fn test_command_with_env() {
-        let cmd = Cmd::new("cargo").arg("build").env("RUSTFLAGS", "-Awarnings");
+        let cmd = Cmd::new("cargo")
+            .arg("build")
+            .env("RUSTFLAGS", "-Awarnings");
         assert_eq!(format!("{}", cmd), "RUSTFLAGS=-Awarnings cargo build");
     }
 

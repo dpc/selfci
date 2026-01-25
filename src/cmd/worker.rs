@@ -1,6 +1,5 @@
 use duct::cmd;
 use selfci::{CheckError, envs, protocol};
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -211,9 +210,8 @@ pub struct JobSpawnContext {
 #[allow(clippy::too_many_arguments)]
 pub fn control_socket_listener(
     listener: UnixListener,
-    job_steps: Arc<Mutex<HashMap<String, Vec<protocol::StepLogEntry>>>>,
+    shared_job_states: super::check::SharedJobStates,
     used_job_names: Arc<Mutex<std::collections::HashSet<String>>>,
-    job_completions: Arc<Mutex<HashMap<String, protocol::JobStatus>>>,
     jobs_sender: mpsc::Sender<RunJobRequest>,
     messages_sender: mpsc::Sender<JobMessage>,
     spawn_context: JobSpawnContext,
@@ -227,9 +225,8 @@ pub fn control_socket_listener(
                     debug!("Control socket listener shutting down");
                     break;
                 }
-                let job_steps_clone = Arc::clone(&job_steps);
+                let shared_job_states_clone = shared_job_states.clone();
                 let used_job_names_clone = Arc::clone(&used_job_names);
-                let job_completions_clone = Arc::clone(&job_completions);
                 let jobs_sender_clone = jobs_sender.clone();
                 let messages_sender_clone = messages_sender.clone();
                 let spawn_context_clone = spawn_context.clone();
@@ -256,17 +253,14 @@ pub fn control_socket_listener(
                                 let poll_interval = std::time::Duration::from_millis(100);
 
                                 loop {
-                                    {
-                                        let completions = job_completions_clone.lock().unwrap();
-                                        if let Some(status) = completions.get(&name) {
-                                            let _ = protocol::write_response(
-                                                &mut stream,
-                                                protocol::JobControlResponse::JobCompleted {
-                                                    status: status.clone(),
-                                                },
-                                            );
-                                            return;
-                                        }
+                                    let status = shared_job_states_clone
+                                        .with(|s| s.completions.get(&name).cloned());
+                                    if let Some(status) = status {
+                                        let _ = protocol::write_response(
+                                            &mut stream,
+                                            protocol::JobControlResponse::JobCompleted { status },
+                                        );
+                                        return;
                                     }
 
                                     std::thread::sleep(poll_interval);
@@ -337,21 +331,19 @@ pub fn control_socket_listener(
                                 let ts = std::time::SystemTime::now();
 
                                 // Check if there's a previous Running step and complete it
-                                {
-                                    let mut steps = job_steps_clone.lock().unwrap();
-                                    let job_steps_vec = steps.entry(job_name.clone()).or_default();
+                                let prev_step_completed = shared_job_states_clone.with_mut(|s| {
+                                    let job_steps_vec =
+                                        s.steps.entry(job_name.clone()).or_default();
 
-                                    if let Some(prev_step) = job_steps_vec.last_mut()
+                                    let completed_step = if let Some(prev_step) =
+                                        job_steps_vec.last_mut()
                                         && matches!(prev_step.status, protocol::StepStatus::Running)
                                     {
                                         prev_step.status = protocol::StepStatus::Success;
-                                        let _ =
-                                            messages_sender_clone.send(JobMessage::StepCompleted {
-                                                job_name: job_name.clone(),
-                                                step_name: prev_step.name.clone(),
-                                                status: protocol::StepStatus::Success,
-                                            });
-                                    }
+                                        Some(prev_step.name.clone())
+                                    } else {
+                                        None
+                                    };
 
                                     let entry = protocol::StepLogEntry {
                                         ts,
@@ -359,6 +351,17 @@ pub fn control_socket_listener(
                                         status: protocol::StepStatus::Running,
                                     };
                                     job_steps_vec.push(entry);
+
+                                    completed_step
+                                });
+
+                                // Send StepCompleted message if we completed a previous step
+                                if let Some(prev_step_name) = prev_step_completed {
+                                    let _ = messages_sender_clone.send(JobMessage::StepCompleted {
+                                        job_name: job_name.clone(),
+                                        step_name: prev_step_name,
+                                        status: protocol::StepStatus::Success,
+                                    });
                                 }
 
                                 // Send StepStarted message
@@ -375,13 +378,35 @@ pub fn control_socket_listener(
                                 debug!(job = %job_name, step = %step_name, "Step logged via control socket");
                             }
                             protocol::JobControlRequest::MarkStepFailed { job_name, ignore } => {
-                                let mut steps = job_steps_clone.lock().unwrap();
-                                if let Some(job_steps) = steps.get_mut(&job_name) {
-                                    if let Some(last_step) = job_steps.last_mut() {
-                                        let status =
-                                            protocol::StepStatus::Failed { ignored: ignore };
-                                        last_step.status = status.clone();
-                                        let step_name = last_step.name.clone();
+                                enum MarkResult {
+                                    Marked {
+                                        step_name: String,
+                                        status: protocol::StepStatus,
+                                    },
+                                    NoSteps,
+                                    JobNotFound,
+                                }
+
+                                let result = shared_job_states_clone.with_mut(|s| {
+                                    if let Some(job_steps) = s.steps.get_mut(&job_name) {
+                                        if let Some(last_step) = job_steps.last_mut() {
+                                            let status =
+                                                protocol::StepStatus::Failed { ignored: ignore };
+                                            last_step.status = status.clone();
+                                            MarkResult::Marked {
+                                                step_name: last_step.name.clone(),
+                                                status,
+                                            }
+                                        } else {
+                                            MarkResult::NoSteps
+                                        }
+                                    } else {
+                                        MarkResult::JobNotFound
+                                    }
+                                });
+
+                                match result {
+                                    MarkResult::Marked { step_name, status } => {
                                         debug!(job = %job_name, step = %step_name, ignore, "Step marked as failed");
 
                                         // Send StepCompleted message with failed status
@@ -396,7 +421,8 @@ pub fn control_socket_listener(
                                             &mut stream,
                                             protocol::JobControlResponse::StepMarkedFailed,
                                         );
-                                    } else {
+                                    }
+                                    MarkResult::NoSteps => {
                                         let error_msg =
                                             format!("No steps found for job '{}'", job_name);
                                         debug!("{}", error_msg);
@@ -405,13 +431,14 @@ pub fn control_socket_listener(
                                             protocol::JobControlResponse::Error(error_msg),
                                         );
                                     }
-                                } else {
-                                    let error_msg = format!("Job '{}' not found", job_name);
-                                    debug!("{}", error_msg);
-                                    let _ = protocol::write_response(
-                                        &mut stream,
-                                        protocol::JobControlResponse::Error(error_msg),
-                                    );
+                                    MarkResult::JobNotFound => {
+                                        let error_msg = format!("Job '{}' not found", job_name);
+                                        debug!("{}", error_msg);
+                                        let _ = protocol::write_response(
+                                            &mut stream,
+                                            protocol::JobControlResponse::Error(error_msg),
+                                        );
+                                    }
                                 }
                             }
                         }
