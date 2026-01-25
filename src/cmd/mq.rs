@@ -205,42 +205,43 @@ impl MQState {
         let mut info = entry.info.clone();
 
         // For active runs (started but not completed), derive running jobs from steps and completions
-        if info.started_at.is_some() && info.completed_at.is_none() {
-            if let Some(ref job_states) = entry.job_states {
-                // Jobs that have steps but aren't in completions are running
-                info.active_jobs = job_states.with(|s| {
-                    s.steps
-                        .iter()
-                        .filter(|(job_name, _)| !s.completions.contains_key(*job_name))
-                        .map(|(job_name, job_steps)| {
-                            // Use first step timestamp as job start time
-                            let started_at = job_steps
-                                .first()
-                                .map(|s| s.ts)
-                                .unwrap_or_else(SystemTime::now);
+        if info.started_at.is_some()
+            && info.completed_at.is_none()
+            && let Some(ref job_states) = entry.job_states
+        {
+            // Jobs that have steps but aren't in completions are running
+            info.active_jobs = job_states.with(|s| {
+                s.steps
+                    .iter()
+                    .filter(|(job_name, _)| !s.completions.contains_key(*job_name))
+                    .map(|(job_name, job_steps)| {
+                        // Use first step timestamp as job start time
+                        let started_at = job_steps
+                            .first()
+                            .map(|s| s.ts)
+                            .unwrap_or_else(SystemTime::now);
 
-                            // Find current step (last one with Running status)
-                            let current_step = job_steps
-                                .iter()
-                                .rev()
-                                .find(|s| matches!(s.status, protocol::StepStatus::Running))
-                                .map(|s| s.name.clone());
+                        // Find current step (last one with Running status)
+                        let current_step = job_steps
+                            .iter()
+                            .rev()
+                            .find(|s| matches!(s.status, protocol::StepStatus::Running))
+                            .map(|s| s.name.clone());
 
-                            let name = if let Some(step) = current_step {
-                                format!("{}/{}", job_name, step)
-                            } else {
-                                job_name.clone()
-                            };
+                        let name = if let Some(step) = current_step {
+                            format!("{}/{}", job_name, step)
+                        } else {
+                            job_name.clone()
+                        };
 
-                            protocol::StepLogEntry {
-                                ts: started_at,
-                                name,
-                                status: protocol::StepStatus::Running,
-                            }
-                        })
-                        .collect()
-                });
-            }
+                        protocol::StepLogEntry {
+                            ts: started_at,
+                            name,
+                            status: protocol::StepStatus::Running,
+                        }
+                    })
+                    .collect()
+            });
         }
 
         Some(info)

@@ -82,7 +82,6 @@
                   craneLib'.overrideArgs {
                     pname = projectName;
                     src = buildSrc;
-                    nativeBuildInputs = with pkgs; [ ];
                   }
                 );
               in
@@ -113,6 +112,7 @@
                   # must be deps, otherwise it will not rebuild
                   # anything and thus not detect anything
                   cargoArtifacts = workspaceDeps;
+                  cargoClippyExtraArgs = "--all-targets -- -D warnings";
                 };
               }
             );

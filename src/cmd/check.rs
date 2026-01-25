@@ -124,20 +124,6 @@ fn run_post_clone_hook(
     }
 }
 
-/// Run a candidate check - shared implementation for both inline checks and merge queue
-///
-/// A "candidate check" runs the configured CI command against a candidate revision,
-/// starting with the "main" job and potentially spawning additional jobs for parallelism.
-///
-/// If `post_clone_hook` is provided, it will be run after worktrees are created but before
-/// the job starts. The hook receives environment variables for the worktree paths.
-///
-/// The `original_candidate` parameter is used in MQ mode to distinguish between:
-/// - The original candidate (what the user submitted) -> SELFCI_CANDIDATE_* env vars
-/// - The working candidate (after test merge/rebase) -> SELFCI_MERGED_* env vars
-///
-/// In regular check mode, `original_candidate` is None and SELFCI_MERGED_* is not set.
-
 /// State for tracking jobs during check execution.
 #[derive(Default)]
 pub struct JobStates {
@@ -176,6 +162,20 @@ impl SharedJobStates {
     }
 }
 
+/// Run a candidate check - shared implementation for both inline checks and merge queue
+///
+/// A "candidate check" runs the configured CI command against a candidate revision,
+/// starting with the "main" job and potentially spawning additional jobs for parallelism.
+///
+/// If `post_clone_hook` is provided, it will be run after worktrees are created but before
+/// the job starts. The hook receives environment variables for the worktree paths.
+///
+/// The `original_candidate` parameter is used in MQ mode to distinguish between:
+/// - The original candidate (what the user submitted) -> SELFCI_CANDIDATE_* env vars
+/// - The working candidate (after test merge/rebase) -> SELFCI_MERGED_* env vars
+///
+/// In regular check mode, `original_candidate` is None and SELFCI_MERGED_* is not set.
+#[allow(clippy::too_many_arguments)]
 pub fn run_candidate_check(
     root_dir: &Path,
     base_rev: &ResolvedRevision,
