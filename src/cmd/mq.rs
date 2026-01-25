@@ -2,9 +2,11 @@ use duct::cmd;
 use nix::sys::signal::{self, Signal};
 use nix::sys::stat::{Mode, umask};
 use nix::unistd::{ForkResult, Pid, close, dup2, fork, setsid};
+use selfci::duct_util::Cmd;
 use selfci::{MainError, WorkDirError, constants, envs, get_vcs, mq_protocol, protocol};
 use signal_hook::consts::SIGTERM;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::os::unix::io::IntoRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -133,6 +135,8 @@ impl MQState {
             queued_at: SystemTime::now(),
             started_at: None,
             completed_at: None,
+            merge_style: None,
+            test_merge_output: String::new(),
             output: String::new(),
             steps: Vec::new(),
             no_merge,
@@ -1078,6 +1082,10 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                 }
             };
 
+        // Store the test merge output and style in the job info
+        job_info.merge_style = Some(merge_style.clone());
+        job_info.test_merge_output = test_merge_result.output.clone();
+
         // Use the merged commit for CI testing
         let merged_commit_id = test_merge_result.commit_id.to_string();
         let merged_change_id = test_merge_result.change_id.to_string();
@@ -1187,7 +1195,6 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
                 let check_output = result.output.clone();
 
                 // Append check output to job output (preserving hook outputs)
-                job_info.output.push_str("### Check Output\n\n");
                 job_info.output.push_str(&result.output);
                 job_info.steps = result.steps;
                 job_info.completed_at = Some(SystemTime::now());
@@ -1297,42 +1304,49 @@ fn process_queue(state: SharedMQState, root_dir: PathBuf, mq_jobs_receiver: mpsc
 }
 
 /// Result of a test merge operation (merge/rebase before CI check)
-pub(crate) struct TestMergeResult {
+pub(crate) struct TestMergeOutcome {
     /// The commit ID of the merged/rebased commit
     pub(crate) commit_id: selfci::revision::CommitId,
     /// The change ID (for jujutsu, same as commit_id for git)
     pub(crate) change_id: selfci::revision::ChangeId,
+    /// Log of commands executed during the test merge
+    pub(crate) output: String,
 }
 
 /// Test rebase for Git - rebases candidate onto base without updating any refs
-/// Returns the resulting commit ID
+/// Returns the resulting commit ID and log of commands executed
 fn test_merge_git_rebase(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
-) -> Result<TestMergeResult, selfci::MergeError> {
+) -> Result<TestMergeOutcome, selfci::MergeError> {
+    let mut output_log = String::new();
+
     // Create temporary worktree in detached HEAD state at candidate commit
     let temp_worktree = root_dir.join(format!(".git/selfci-test-worktree-{}", candidate.commit_id));
 
-    debug!(
-        worktree = %temp_worktree.display(),
-        candidate = %candidate.commit_id,
-        base = %base_branch,
-        "Creating test rebase worktree"
-    );
+    output_log.push_str(&format!(
+        "Git test rebase: rebasing {} onto {}\n\n",
+        candidate.commit_id, base_branch
+    ));
 
-    cmd!(
-        "git",
-        "worktree",
-        "add",
-        "--detach",
-        &temp_worktree,
-        candidate.commit_id.as_str()
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .run()
-    .map_err(selfci::MergeError::WorktreeCreateFailed)?;
+    let worktree_cmd = Cmd::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            &temp_worktree.display().to_string(),
+            candidate.commit_id.as_str(),
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", worktree_cmd.log_line());
+    let output = worktree_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(selfci::MergeError::WorktreeCreateFailed)?;
+    output_log.push_str(&output);
+    output_log.push_str("\n\n");
 
     // Ensure cleanup on any exit path
     let cleanup = scopeguard::guard((), |_| {
@@ -1342,73 +1356,88 @@ fn test_merge_git_rebase(
     });
 
     // In the worktree, rebase onto base_branch
-    debug!(base = %base_branch, "Rebasing onto base branch");
-    let rebase_result = cmd!("git", "rebase", base_branch)
-        .dir(&temp_worktree)
+    let rebase_cmd = Cmd::new("git")
+        .args(["rebase", base_branch])
+        .dir(&temp_worktree);
+    let _ = write!(output_log, "{}", rebase_cmd.log_line());
+    let rebase_result = rebase_cmd
+        .to_expression()
         .stderr_to_stdout()
         .stdout_capture()
         .unchecked()
         .run()
         .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
 
+    let rebase_output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
+    output_log.push_str(&rebase_output);
+    output_log.push_str("\n\n");
+
     if !rebase_result.status.success() {
         // Abort the rebase to clean up
         let _ = cmd!("git", "rebase", "--abort").dir(&temp_worktree).run();
-        let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
         return Err(selfci::MergeError::RebaseFailed(
-            selfci::CommandOutputError(output),
+            selfci::CommandOutputError(rebase_output),
         ));
     }
 
     // Get the resulting commit ID (HEAD in worktree)
-    let commit_id = cmd!("git", "rev-parse", "HEAD")
-        .dir(&temp_worktree)
+    let rev_parse_cmd = Cmd::new("git")
+        .args(["rev-parse", "HEAD"])
+        .dir(&temp_worktree);
+    let _ = write!(output_log, "{}", rev_parse_cmd.log_line());
+    let commit_id = rev_parse_cmd
+        .to_expression()
         .read()
         .map_err(selfci::MergeError::BranchUpdateFailed)?
         .trim()
         .to_string();
-
-    debug!(commit_id = %commit_id, "Test rebase complete");
+    output_log.push_str(&format!("{}\n\n", commit_id));
 
     // Cleanup is handled by scopeguard
     drop(cleanup);
 
-    Ok(TestMergeResult {
+    Ok(TestMergeOutcome {
         commit_id: selfci::revision::CommitId::new(commit_id.clone())
             .expect("git rev-parse returned invalid commit id"),
         change_id: selfci::revision::ChangeId::new(commit_id),
+        output: output_log,
     })
 }
 
 /// Test merge for Git - merges candidate into base without updating any refs
-/// Returns the resulting commit ID
+/// Returns the resulting commit ID and log of commands executed
 fn test_merge_git_merge(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
-) -> Result<TestMergeResult, selfci::MergeError> {
+) -> Result<TestMergeOutcome, selfci::MergeError> {
+    let mut output_log = String::new();
+
     // Create temporary worktree at base branch
     let temp_worktree = root_dir.join(format!(".git/selfci-test-worktree-{}", candidate.commit_id));
 
-    debug!(
-        worktree = %temp_worktree.display(),
-        candidate = %candidate.commit_id,
-        base = %base_branch,
-        "Creating test merge worktree"
-    );
+    output_log.push_str(&format!(
+        "Git test merge: merging {} into {}\n\n",
+        candidate.commit_id, base_branch
+    ));
 
-    cmd!(
-        "git",
-        "worktree",
-        "add",
-        "--detach",
-        &temp_worktree,
-        base_branch
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .run()
-    .map_err(selfci::MergeError::WorktreeCreateFailed)?;
+    let worktree_cmd = Cmd::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            &temp_worktree.display().to_string(),
+            base_branch,
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", worktree_cmd.log_line());
+    let output = worktree_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(selfci::MergeError::WorktreeCreateFailed)?;
+    output_log.push_str(&output);
+    output_log.push_str("\n\n");
 
     // Ensure cleanup on any exit path
     let cleanup = scopeguard::guard((), |_| {
@@ -1418,48 +1447,59 @@ fn test_merge_git_merge(
     });
 
     // In the worktree, merge candidate
-    debug!(candidate = %candidate.commit_id, "Merging candidate");
-    let merge_result = cmd!(
-        "git",
-        "merge",
-        "--no-ff",
-        "-m",
-        "Test merge by SelfCI",
-        candidate.commit_id.as_str()
-    )
-    .dir(&temp_worktree)
-    .stderr_to_stdout()
-    .stdout_capture()
-    .unchecked()
-    .run()
-    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+    let merge_cmd = Cmd::new("git")
+        .args([
+            "merge",
+            "--no-ff",
+            "-m",
+            "Test merge by SelfCI",
+            candidate.commit_id.as_str(),
+        ])
+        .dir(&temp_worktree);
+    let _ = write!(output_log, "{}", merge_cmd.log_line());
+    let merge_result = merge_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
+        .run()
+        .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+
+    let merge_output = String::from_utf8_lossy(&merge_result.stdout).to_string();
+    output_log.push_str(&merge_output);
+    output_log.push_str("\n\n");
 
     if !merge_result.status.success() {
         // Abort the merge to clean up
         let _ = cmd!("git", "merge", "--abort").dir(&temp_worktree).run();
-        let output = String::from_utf8_lossy(&merge_result.stdout).to_string();
         return Err(selfci::MergeError::MergeFailed(selfci::CommandOutputError(
-            output,
+            merge_output,
         )));
     }
 
     // Get the resulting commit ID (HEAD in worktree)
-    let commit_id = cmd!("git", "rev-parse", "HEAD")
-        .dir(&temp_worktree)
+    let rev_parse_cmd = Cmd::new("git")
+        .args(["rev-parse", "HEAD"])
+        .dir(&temp_worktree);
+    let _ = write!(output_log, "{}", rev_parse_cmd.log_line());
+    let commit_id = rev_parse_cmd
+        .to_expression()
         .read()
         .map_err(selfci::MergeError::BranchUpdateFailed)?
         .trim()
         .to_string();
+    output_log.push_str(&format!("{}\n\n", commit_id));
 
-    debug!(commit_id = %commit_id, "Test merge complete");
+    output_log.push_str("Test merge complete\n");
 
     // Cleanup is handled by scopeguard
     drop(cleanup);
 
-    Ok(TestMergeResult {
+    Ok(TestMergeOutcome {
         commit_id: selfci::revision::CommitId::new(commit_id.clone())
             .expect("git rev-parse returned invalid commit id"),
         change_id: selfci::revision::ChangeId::new(commit_id),
+        output: output_log,
     })
 }
 
@@ -1506,23 +1546,23 @@ fn test_merge_jj_rebase(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
-) -> Result<TestMergeResult, selfci::MergeError> {
-    debug!(
-        candidate = %candidate.commit_id,
-        base = %base_branch,
-        "Duplicating candidate branch for test rebase"
-    );
+) -> Result<TestMergeOutcome, selfci::MergeError> {
+    let mut output_log = String::new();
 
     // Duplicate the candidate branch (commits from base to candidate, exclusive of base)
     // This creates copies with new change IDs, leaving the original untouched
     let revset = format!("{}..{}", base_branch, candidate.commit_id);
-    let dup_output = cmd!("jj", "--ignore-working-copy", "duplicate", &revset)
-        .dir(root_dir)
+    let dup_cmd = Cmd::new("jj")
+        .args(["--ignore-working-copy", "duplicate", &revset])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", dup_cmd.log_line());
+    let dup_output = dup_cmd
+        .to_expression()
         .stderr_to_stdout()
         .read()
         .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
-
-    debug!(dup_output = %dup_output, "Duplicate output");
+    output_log.push_str(&dup_output);
+    output_log.push_str("\n\n");
 
     // Parse the output to find the duplicate of the candidate tip
     // Output format: "Duplicated <short_commit_id> as <new_change_id> <new_short_commit_id> <description>"
@@ -1546,63 +1586,76 @@ fn test_merge_jj_rebase(
         )))
     })?;
 
-    debug!(dup_change_id = %dup_change_id, "Found duplicated tip change ID");
-
     // Rebase the duplicated commits onto base branch
-    let rebase_result = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "rebase",
-        "-b",
-        &dup_change_id,
-        "-d",
-        base_branch
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .stdout_capture()
-    .unchecked()
-    .run()
-    .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
+    let rebase_cmd = Cmd::new("jj")
+        .args([
+            "--ignore-working-copy",
+            "rebase",
+            "-b",
+            &dup_change_id,
+            "-d",
+            base_branch,
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", rebase_cmd.log_line());
+    let rebase_result = rebase_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
+        .run()
+        .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
+
+    let rebase_output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
+    output_log.push_str(&rebase_output);
+    output_log.push_str("\n\n");
 
     if !rebase_result.status.success() {
-        let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
         return Err(selfci::MergeError::RebaseFailed(
-            selfci::CommandOutputError(output),
+            selfci::CommandOutputError(rebase_output),
         ));
     }
 
     // Get the commit ID of the rebased duplicate
-    let commit_id = cmd!(
-        "jj",
-        "log",
-        "-r",
-        &dup_change_id,
-        "-T",
-        "commit_id",
-        "--no-graph",
-        "--color=never"
-    )
-    .dir(root_dir)
-    .read()
-    .map_err(selfci::MergeError::ChangeIdFailed)?
-    .trim()
-    .to_string();
-
-    debug!(commit_id = %commit_id, dup_change_id = %dup_change_id, "Test rebase complete");
+    let commit_id_cmd = Cmd::new("jj")
+        .args([
+            "log",
+            "-r",
+            &dup_change_id,
+            "-T",
+            "commit_id",
+            "--no-graph",
+            "--color=never",
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", commit_id_cmd.log_line());
+    let commit_id = commit_id_cmd
+        .to_expression()
+        .read()
+        .map_err(selfci::MergeError::ChangeIdFailed)?
+        .trim()
+        .to_string();
+    output_log.push_str(&format!("{}\n\n", commit_id));
 
     // Update working copy snapshot to avoid stale errors
-    cmd!("jj", "workspace", "update-stale")
-        .dir(root_dir)
+    let update_cmd = Cmd::new("jj")
+        .args(["workspace", "update-stale"])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", update_cmd.log_line());
+    let update_output = update_cmd
+        .to_expression()
         .stdin_null()
         .stderr_to_stdout()
-        .run()
+        .read()
         .map_err(selfci::MergeError::BranchUpdateFailed)?;
+    output_log.push_str(&update_output);
+    output_log.push_str("\n\n");
 
-    Ok(TestMergeResult {
+    Ok(TestMergeOutcome {
         commit_id: selfci::revision::CommitId::new(commit_id)
             .expect("jj log returned invalid commit id"),
         change_id: selfci::revision::ChangeId::new(dup_change_id),
+        output: output_log,
     })
 }
 
@@ -1612,27 +1665,33 @@ fn test_merge_jj_merge(
     root_dir: &Path,
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
-) -> Result<TestMergeResult, selfci::MergeError> {
-    debug!(
-        candidate = %candidate.commit_id,
-        base = %base_branch,
-        "Creating test merge commit"
-    );
+) -> Result<TestMergeOutcome, selfci::MergeError> {
+    let mut output_log = String::new();
+
+    output_log.push_str(&format!(
+        "Jujutsu test merge: merging {} into {}\n\n",
+        candidate.commit_id, base_branch
+    ));
 
     // Create a new merge commit with both base and candidate as parents
-    let output = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "new",
-        "--no-edit",
-        base_branch,
-        candidate.commit_id.as_str()
-    )
-    .dir(root_dir)
-    .stdin_null()
-    .stderr_to_stdout()
-    .read()
-    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+    let new_cmd = Cmd::new("jj")
+        .args([
+            "--ignore-working-copy",
+            "new",
+            "--no-edit",
+            base_branch,
+            candidate.commit_id.as_str(),
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", new_cmd.log_line());
+    let output = new_cmd
+        .to_expression()
+        .stdin_null()
+        .stderr_to_stdout()
+        .read()
+        .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+    output_log.push_str(&output);
+    output_log.push_str("\n\n");
 
     // Parse the output to get the change ID
     // Output format: "Created new commit <change_id> <short_commit_id> ..."
@@ -1656,36 +1715,47 @@ fn test_merge_jj_merge(
     })?;
 
     // Get the full commit ID using jj log (the output only has short ID)
-    let commit_id = cmd!(
-        "jj",
-        "log",
-        "-r",
-        *change_id,
-        "-T",
-        "commit_id",
-        "--no-graph",
-        "--color=never"
-    )
-    .dir(root_dir)
-    .read()
-    .map_err(selfci::MergeError::ChangeIdFailed)?
-    .trim()
-    .to_string();
-
-    debug!(commit_id = %commit_id, change_id = %change_id, "Test merge complete");
+    let commit_id_cmd = Cmd::new("jj")
+        .args([
+            "log",
+            "-r",
+            *change_id,
+            "-T",
+            "commit_id",
+            "--no-graph",
+            "--color=never",
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", commit_id_cmd.log_line());
+    let commit_id = commit_id_cmd
+        .to_expression()
+        .read()
+        .map_err(selfci::MergeError::ChangeIdFailed)?
+        .trim()
+        .to_string();
+    output_log.push_str(&format!("{}\n\n", commit_id));
 
     // Update working copy snapshot to avoid stale errors
-    cmd!("jj", "workspace", "update-stale")
-        .dir(root_dir)
+    let update_cmd = Cmd::new("jj")
+        .args(["workspace", "update-stale"])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", update_cmd.log_line());
+    let update_output = update_cmd
+        .to_expression()
         .stdin_null()
         .stderr_to_stdout()
-        .run()
+        .read()
         .map_err(selfci::MergeError::BranchUpdateFailed)?;
+    output_log.push_str(&update_output);
+    output_log.push_str("\n\n");
 
-    Ok(TestMergeResult {
+    output_log.push_str("Test merge complete\n");
+
+    Ok(TestMergeOutcome {
         commit_id: selfci::revision::CommitId::new(commit_id.to_string())
             .expect("jj new returned invalid commit id"),
         change_id: selfci::revision::ChangeId::new(change_id.to_string()),
+        output: output_log,
     })
 }
 
@@ -1696,7 +1766,7 @@ pub(crate) fn create_test_merge(
     base_branch: &str,
     candidate: &selfci::revision::ResolvedRevision,
     merge_style: &selfci::config::MergeStyle,
-) -> Result<TestMergeResult, selfci::MergeError> {
+) -> Result<TestMergeOutcome, selfci::MergeError> {
     // Detect VCS
     let vcs = get_vcs(root_dir, None).map_err(|e| {
         selfci::MergeError::ConfigReadFailed(std::io::Error::new(
@@ -1734,29 +1804,28 @@ fn merge_candidate_git_rebase(
     let temp_worktree = root_dir.join(format!(".git/selfci-worktree-{}", candidate.commit_id));
 
     merge_log.push_str(&format!(
-        "Git rebase mode: rebasing {} onto {}\n",
+        "Git rebase mode: rebasing {} onto {}\n\n",
         candidate.commit_id, base_branch
     ));
 
     // Create temporary worktree in detached HEAD state at candidate commit
-    merge_log.push_str(&format!(
-        "Creating temporary worktree at {}\n",
-        temp_worktree.display()
-    ));
-    let output = cmd!(
-        "git",
-        "worktree",
-        "add",
-        "--detach",
-        &temp_worktree,
-        candidate.commit_id.as_str()
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .read()
-    .map_err(selfci::MergeError::WorktreeCreateFailed)?;
+    let worktree_cmd = Cmd::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            &temp_worktree.display().to_string(),
+            candidate.commit_id.as_str(),
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", worktree_cmd.log_line());
+    let output = worktree_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(selfci::MergeError::WorktreeCreateFailed)?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Ensure cleanup on any exit path
     let cleanup = scopeguard::guard((), |_| {
@@ -1766,9 +1835,12 @@ fn merge_candidate_git_rebase(
     });
 
     // In the worktree, rebase onto base_branch
-    merge_log.push_str(&format!("Rebasing onto {}\n", base_branch));
-    let rebase_result = cmd!("git", "rebase", base_branch)
-        .dir(&temp_worktree)
+    let rebase_cmd = Cmd::new("git")
+        .args(["rebase", base_branch])
+        .dir(&temp_worktree);
+    let _ = write!(merge_log, "{}", rebase_cmd.log_line());
+    let rebase_result = rebase_cmd
+        .to_expression()
         .stderr_to_stdout()
         .stdout_capture()
         .unchecked()
@@ -1782,22 +1854,20 @@ fn merge_candidate_git_rebase(
         ));
     }
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Update base_branch to point to the rebased commits (HEAD in worktree)
-    merge_log.push_str(&format!("Updating {} to rebased commits\n", base_branch));
-    let output = cmd!(
-        "git",
-        "update-ref",
-        format!("refs/heads/{}", base_branch),
-        "HEAD"
-    )
-    .dir(&temp_worktree)
-    .stderr_to_stdout()
-    .read()
-    .map_err(selfci::MergeError::BranchUpdateFailed)?;
+    let update_ref_cmd = Cmd::new("git")
+        .args(["update-ref", &format!("refs/heads/{}", base_branch), "HEAD"])
+        .dir(&temp_worktree);
+    let _ = write!(merge_log, "{}", update_ref_cmd.log_line());
+    let output = update_ref_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(selfci::MergeError::BranchUpdateFailed)?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Cleanup is handled by scopeguard
     drop(cleanup);
@@ -1818,29 +1888,28 @@ fn merge_candidate_git_merge(
     let temp_worktree = root_dir.join(format!(".git/selfci-worktree-{}", candidate.commit_id));
 
     merge_log.push_str(&format!(
-        "Git merge mode: merging {} into {}\n",
+        "Git merge mode: merging {} into {}\n\n",
         candidate.commit_id, base_branch
     ));
 
     // Create temporary worktree in detached HEAD state at base branch
-    merge_log.push_str(&format!(
-        "Creating temporary worktree at {}\n",
-        temp_worktree.display()
-    ));
-    let output = cmd!(
-        "git",
-        "worktree",
-        "add",
-        "--detach",
-        &temp_worktree,
-        base_branch
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .read()
-    .map_err(selfci::MergeError::WorktreeCreateFailed)?;
+    let worktree_cmd = Cmd::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            &temp_worktree.display().to_string(),
+            base_branch,
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", worktree_cmd.log_line());
+    let output = worktree_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(selfci::MergeError::WorktreeCreateFailed)?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Ensure cleanup on any exit path
     let cleanup = scopeguard::guard((), |_| {
@@ -1849,29 +1918,30 @@ fn merge_candidate_git_merge(
             .run();
     });
 
-    // In the worktree, merge candidate with a custom message
-    merge_log.push_str(&format!("Merging {} with --no-ff\n", candidate.commit_id));
-
     // Build the merge commit message
     let merge_message = format!(
         "Merge commit '{}' by SelfCI\n\n### Check Output\n\n{}",
         candidate.commit_id, test_output
     );
 
-    let merge_result = cmd!(
-        "git",
-        "merge",
-        "--no-ff",
-        "-m",
-        &merge_message,
-        candidate.commit_id.as_str()
-    )
-    .dir(&temp_worktree)
-    .stderr_to_stdout()
-    .stdout_capture()
-    .unchecked()
-    .run()
-    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+    // In the worktree, merge candidate with a custom message
+    let merge_cmd = Cmd::new("git")
+        .args([
+            "merge",
+            "--no-ff",
+            "-m",
+            &merge_message,
+            candidate.commit_id.as_str(),
+        ])
+        .dir(&temp_worktree);
+    let _ = write!(merge_log, "{}", merge_cmd.log_line());
+    let merge_result = merge_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
+        .run()
+        .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
     let output = String::from_utf8_lossy(&merge_result.stdout).to_string();
     if !merge_result.status.success() {
         let _ = cmd!("git", "merge", "--abort").dir(&temp_worktree).run();
@@ -1880,22 +1950,20 @@ fn merge_candidate_git_merge(
         )));
     }
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Update base_branch to point to the merge commit (HEAD in worktree)
-    merge_log.push_str(&format!("Updating {} to merge commit\n", base_branch));
-    let output = cmd!(
-        "git",
-        "update-ref",
-        format!("refs/heads/{}", base_branch),
-        "HEAD"
-    )
-    .dir(&temp_worktree)
-    .stderr_to_stdout()
-    .read()
-    .map_err(selfci::MergeError::BranchUpdateFailed)?;
+    let update_ref_cmd = Cmd::new("git")
+        .args(["update-ref", &format!("refs/heads/{}", base_branch), "HEAD"])
+        .dir(&temp_worktree);
+    let _ = write!(merge_log, "{}", update_ref_cmd.log_line());
+    let output = update_ref_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(selfci::MergeError::BranchUpdateFailed)?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Cleanup is handled by scopeguard
     drop(cleanup);
@@ -1913,47 +1981,51 @@ fn merge_candidate_jj_rebase(
 
     // Jujutsu rebase mode - rebase candidate branch onto base branch
     merge_log.push_str(&format!(
-        "Jujutsu rebase mode: rebasing {} onto {}\n",
+        "Jujutsu rebase mode: rebasing {} onto {}\n\n",
         candidate.commit_id, base_branch
     ));
 
     // Get the change ID of the candidate (stable across rebases)
-    merge_log.push_str("Getting change ID of candidate\n");
-    let change_id = cmd!(
-        "jj",
-        "log",
-        "-r",
-        candidate.commit_id.as_str(),
-        "-T",
-        "change_id",
-        "--no-graph",
-        "--color=never"
-    )
-    .dir(root_dir)
-    .read()
-    .map_err(selfci::MergeError::ChangeIdFailed)?
-    .trim()
-    .to_string();
-    merge_log.push_str(&format!("Change ID: {}\n", change_id));
+    let change_id_cmd = Cmd::new("jj")
+        .args([
+            "log",
+            "-r",
+            candidate.commit_id.as_str(),
+            "-T",
+            "change_id",
+            "--no-graph",
+            "--color=never",
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", change_id_cmd.log_line());
+    let change_id = change_id_cmd
+        .to_expression()
+        .read()
+        .map_err(selfci::MergeError::ChangeIdFailed)?
+        .trim()
+        .to_string();
+    merge_log.push_str(&format!("{}\n\n", change_id));
 
     // Rebase the candidate branch onto base
     // The test merge used a duplicate, so the original candidate is still untouched
-    merge_log.push_str("Rebasing branch\n");
-    let rebase_result = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "rebase",
-        "-b",
-        candidate.commit_id.as_str(),
-        "-d",
-        base_branch
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .stdout_capture()
-    .unchecked()
-    .run()
-    .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
+    let rebase_cmd = Cmd::new("jj")
+        .args([
+            "--ignore-working-copy",
+            "rebase",
+            "-b",
+            candidate.commit_id.as_str(),
+            "-d",
+            base_branch,
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", rebase_cmd.log_line());
+    let rebase_result = rebase_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .stdout_capture()
+        .unchecked()
+        .run()
+        .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
     let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
     if !rebase_result.status.success() {
         return Err(selfci::MergeError::RebaseFailed(
@@ -1961,38 +2033,41 @@ fn merge_candidate_jj_rebase(
         ));
     }
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Move the base branch bookmark to the rebased commit using change ID
-    merge_log.push_str(&format!(
-        "Moving {} bookmark to rebased commit\n",
-        base_branch
-    ));
-    let output = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "bookmark",
-        "set",
-        base_branch,
-        "-r",
-        &change_id
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .read()
-    .map_err(selfci::MergeError::BranchUpdateFailed)?;
+    let bookmark_cmd = Cmd::new("jj")
+        .args([
+            "--ignore-working-copy",
+            "bookmark",
+            "set",
+            base_branch,
+            "-r",
+            &change_id,
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", bookmark_cmd.log_line());
+    let output = bookmark_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(selfci::MergeError::BranchUpdateFailed)?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Update the working copy snapshot to avoid "stale working copy" errors
-    merge_log.push_str("Updating working copy snapshot\n");
-    let output = cmd!("jj", "workspace", "update-stale")
-        .dir(root_dir)
+    let update_cmd = Cmd::new("jj")
+        .args(["workspace", "update-stale"])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", update_cmd.log_line());
+    let output = update_cmd
+        .to_expression()
         .stdin_null()
         .stderr_to_stdout()
         .read()
         .map_err(selfci::MergeError::BranchUpdateFailed)?;
     merge_log.push_str(&output);
+    merge_log.push_str("\n\n");
 
     merge_log.push_str("Rebase completed successfully\n");
     Ok(merge_log)
@@ -2008,28 +2083,30 @@ fn merge_candidate_jj_merge(
 
     // Jujutsu merge mode - create a merge commit
     merge_log.push_str(&format!(
-        "Jujutsu merge mode: creating merge commit of {} into {}\n",
+        "Jujutsu merge mode: creating merge commit of {} into {}\n\n",
         candidate.commit_id, base_branch
     ));
 
     // Create a new merge commit with both base and candidate as parents
     // Use --ignore-working-copy and --no-edit to avoid changing the working directory or @
-    merge_log.push_str("Creating merge commit\n");
-    let output = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "new",
-        "--no-edit",
-        base_branch,
-        candidate.commit_id.as_str()
-    )
-    .dir(root_dir)
-    .stdin_null()
-    .stderr_to_stdout()
-    .read()
-    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+    let new_cmd = Cmd::new("jj")
+        .args([
+            "--ignore-working-copy",
+            "new",
+            "--no-edit",
+            base_branch,
+            candidate.commit_id.as_str(),
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", new_cmd.log_line());
+    let output = new_cmd
+        .to_expression()
+        .stdin_null()
+        .stderr_to_stdout()
+        .read()
+        .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Parse the output to get the merge commit ID
     // Output format: "Created new commit <change_id> <commit_id> ..."
@@ -2044,82 +2121,85 @@ fn merge_candidate_jj_merge(
             )))
         })?
         .to_string();
-    merge_log.push_str(&format!(
-        "Merge commit change ID: {}\n",
-        merge_commit_change_id
-    ));
 
     // Set the merge commit description
     let merge_message = format!(
         "Merge commit '{}' by SelfCI\n\n### Check Output\n\n{}",
         candidate.commit_id, test_output
     );
-    merge_log.push_str("Setting merge commit description\n");
-    let output = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "describe",
-        "-r",
-        &merge_commit_change_id,
-        "-m",
-        &merge_message
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .read()
-    .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
+    let describe_cmd = Cmd::new("jj")
+        .args([
+            "--ignore-working-copy",
+            "describe",
+            "-r",
+            &merge_commit_change_id,
+            "-m",
+            &merge_message,
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", describe_cmd.log_line());
+    let output = describe_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(|e| selfci::MergeError::MergeFailed(selfci::CommandOutputError(e.to_string())))?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Get the final commit ID (describe may have changed it)
-    let final_commit_id = cmd!(
-        "jj",
-        "log",
-        "-r",
-        &merge_commit_change_id,
-        "-T",
-        "commit_id",
-        "--no-graph",
-        "--color=never"
-    )
-    .dir(root_dir)
-    .read()
-    .map_err(selfci::MergeError::ChangeIdFailed)?
-    .trim()
-    .to_string();
-    merge_log.push_str(&format!("Final merge commit ID: {}\n", final_commit_id));
+    let commit_id_cmd = Cmd::new("jj")
+        .args([
+            "log",
+            "-r",
+            &merge_commit_change_id,
+            "-T",
+            "commit_id",
+            "--no-graph",
+            "--color=never",
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", commit_id_cmd.log_line());
+    let final_commit_id = commit_id_cmd
+        .to_expression()
+        .read()
+        .map_err(selfci::MergeError::ChangeIdFailed)?
+        .trim()
+        .to_string();
+    merge_log.push_str(&format!("{}\n\n", final_commit_id));
 
     // Move the base branch bookmark to the merge commit
-    merge_log.push_str(&format!(
-        "Moving {} bookmark to merge commit\n",
-        base_branch
-    ));
-    let output = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "bookmark",
-        "set",
-        base_branch,
-        "-r",
-        &final_commit_id
-    )
-    .dir(root_dir)
-    .stderr_to_stdout()
-    .read()
-    .map_err(selfci::MergeError::BranchUpdateFailed)?;
+    let bookmark_cmd = Cmd::new("jj")
+        .args([
+            "--ignore-working-copy",
+            "bookmark",
+            "set",
+            base_branch,
+            "-r",
+            &final_commit_id,
+        ])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", bookmark_cmd.log_line());
+    let output = bookmark_cmd
+        .to_expression()
+        .stderr_to_stdout()
+        .read()
+        .map_err(selfci::MergeError::BranchUpdateFailed)?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     // Update the working copy snapshot to avoid "stale working copy" errors
-    merge_log.push_str("Updating working copy snapshot\n");
-    let output = cmd!("jj", "workspace", "update-stale")
-        .dir(root_dir)
+    let update_cmd = Cmd::new("jj")
+        .args(["workspace", "update-stale"])
+        .dir(root_dir);
+    let _ = write!(merge_log, "{}", update_cmd.log_line());
+    let output = update_cmd
+        .to_expression()
         .stdin_null()
         .stderr_to_stdout()
         .read()
         .map_err(selfci::MergeError::BranchUpdateFailed)?;
     merge_log.push_str(&output);
-    merge_log.push('\n');
+    merge_log.push_str("\n\n");
 
     merge_log.push_str("Merge completed successfully\n");
     Ok(merge_log)
@@ -2317,8 +2397,18 @@ pub fn get_status(job_id: u64) -> Result<(), MainError> {
                 );
             }
 
+            if !job.test_merge_output.is_empty() {
+                let header = match job.merge_style {
+                    Some(selfci::config::MergeStyle::Rebase) => "### Test Rebase",
+                    Some(selfci::config::MergeStyle::Merge) => "### Test Merge",
+                    None => "### Test Merge/Rebase",
+                };
+                println!("\n{}\n", header);
+                println!("{}", job.test_merge_output);
+            }
+
             if !job.output.is_empty() {
-                println!("\nOutput:");
+                println!("\n### Check Output\n");
                 println!("{}", job.output);
             }
 

@@ -93,6 +93,11 @@ pub struct MQJobInfo {
     pub queued_at: SystemTime,
     pub started_at: Option<SystemTime>,
     pub completed_at: Option<SystemTime>,
+    /// The merge style used (rebase or merge)
+    pub merge_style: Option<crate::config::MergeStyle>,
+    /// Output from the test merge/rebase (pre-CI check)
+    pub test_merge_output: String,
+    /// Output from the check command
     pub output: String,
     pub steps: Vec<StepLogEntry>,
     pub no_merge: bool,
