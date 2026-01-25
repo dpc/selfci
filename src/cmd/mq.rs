@@ -1938,7 +1938,6 @@ fn merge_candidate_git_rebase(
     // Cleanup is handled by scopeguard
     drop(cleanup);
 
-    merge_log.push_str("Rebase completed successfully\n");
     Ok(merge_log)
 }
 
@@ -1952,11 +1951,6 @@ fn merge_candidate_git_merge(
 
     // Git merge mode - use a temporary worktree to avoid touching user's working directory
     let temp_worktree = root_dir.join(format!(".git/selfci-worktree-{}", candidate.commit_id));
-
-    merge_log.push_str(&format!(
-        "Git merge mode: merging {} into {}\n\n",
-        candidate.commit_id, base_branch
-    ));
 
     // Create temporary worktree in detached HEAD state at base branch
     let worktree_cmd = Cmd::new("git")
@@ -2045,12 +2039,6 @@ fn merge_candidate_jj_rebase(
 ) -> Result<String, selfci::MergeError> {
     let mut merge_log = String::new();
 
-    // Jujutsu rebase mode - rebase candidate branch onto base branch
-    merge_log.push_str(&format!(
-        "Jujutsu rebase mode: rebasing {} onto {}\n\n",
-        candidate.commit_id, base_branch
-    ));
-
     // Get the change ID of the candidate (stable across rebases)
     let change_id_cmd = Cmd::new("jj")
         .args([
@@ -2135,7 +2123,6 @@ fn merge_candidate_jj_rebase(
     merge_log.push_str(&output);
     merge_log.push_str("\n\n");
 
-    merge_log.push_str("Rebase completed successfully\n");
     Ok(merge_log)
 }
 
@@ -2146,12 +2133,6 @@ fn merge_candidate_jj_merge(
     test_output: &str,
 ) -> Result<String, selfci::MergeError> {
     let mut merge_log = String::new();
-
-    // Jujutsu merge mode - create a merge commit
-    merge_log.push_str(&format!(
-        "Jujutsu merge mode: creating merge commit of {} into {}\n\n",
-        candidate.commit_id, base_branch
-    ));
 
     // Create a new merge commit with both base and candidate as parents
     // Use --ignore-working-copy and --no-edit to avoid changing the working directory or @
@@ -2267,7 +2248,6 @@ fn merge_candidate_jj_merge(
     merge_log.push_str(&output);
     merge_log.push_str("\n\n");
 
-    merge_log.push_str("Merge completed successfully\n");
     Ok(merge_log)
 }
 
