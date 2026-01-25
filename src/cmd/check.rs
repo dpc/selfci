@@ -424,7 +424,7 @@ pub fn run_candidate_check(
                     protocol::StepStatus::Running => "⏳",
                 };
                 output!(
-                    "[{}/{}] {} {}: {} / {} ({:.3}s)",
+                    "[{}/{}] {} {}: {}/{} ({:.3}s)",
                     jobs_completed,
                     total_jobs,
                     emoji,
@@ -474,7 +474,7 @@ pub fn run_candidate_check(
                             protocol::StepStatus::Running => "⏳",
                         };
                         output!(
-                            "[{}/{}] {} {}: {} / {} ({:.3}s)",
+                            "[{}/{}] {} {}: {}/{} ({:.3}s)",
                             jobs_completed,
                             total_jobs,
                             emoji,
