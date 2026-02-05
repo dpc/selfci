@@ -11,7 +11,7 @@ pub mod revision;
 use duct::cmd;
 use std::path::Path;
 
-pub use config::{CloneMode, SelfCIConfig, init_config, read_config};
+pub use config::{CloneMode, InitResult, SelfCIConfig, init_config, read_config};
 pub use error::{
     CheckError, CommandOutputError, ConfigError, MainError, MergeError, VCSError,
     VCSOperationError, WorkDirError,

@@ -59,13 +59,20 @@ fn main_inner() -> Result<(), MainError> {
             let _vcs = detect_vcs(&root_dir)?;
 
             // Initialize config
-            init_config(&root_dir)?;
+            let result = init_config(&root_dir)?;
 
-            println!(
-                "Initialized selfci config at .config/selfci/{}",
-                selfci::constants::CONFIG_FILENAME
-            );
-            println!("Edit this file to configure your CI command.");
+            if result.config_created {
+                println!(
+                    "Initialized selfci config at .config/selfci/{}",
+                    selfci::constants::CONFIG_FILENAME
+                );
+                println!("Edit this file to configure your CI command.");
+            } else {
+                println!(
+                    "Config already exists at .config/selfci/{}",
+                    selfci::constants::CONFIG_FILENAME
+                );
+            }
         }
         Commands::Check {
             root,

@@ -11,6 +11,21 @@ fn test_init_config() {
     let result = init_config(root_path);
     assert!(result.is_ok(), "init_config failed: {:?}", result);
 
+    // Verify InitResult indicates files were created
+    let init_result = result.unwrap();
+    assert!(
+        init_result.config_created,
+        "ci.yaml should be newly created"
+    );
+    assert!(
+        init_result.local_config_created,
+        "local.yaml should be newly created"
+    );
+    assert!(
+        init_result.gitignore_created,
+        ".gitignore should be newly created"
+    );
+
     // Build config directory path
     let mut config_dir = root_path.to_path_buf();
     for segment in constants::CONFIG_DIR_PATH {
@@ -115,9 +130,29 @@ fn test_init_config_preserves_existing() {
     fs::write(&local_config_path, custom_local_content)
         .expect("Failed to write custom local config");
 
+    // Write custom .gitignore
+    let gitignore_path = config_dir.join(constants::GITIGNORE_FILENAME);
+    let custom_gitignore = "# Custom gitignore\nlocal.yaml\n";
+    fs::write(&gitignore_path, custom_gitignore).expect("Failed to write custom .gitignore");
+
     // Call init_config again
     let result = init_config(root_path);
     assert!(result.is_ok(), "Second init_config failed: {:?}", result);
+
+    // Verify InitResult indicates files were NOT created (already existed)
+    let init_result = result.unwrap();
+    assert!(
+        !init_result.config_created,
+        "ci.yaml should not be reported as created"
+    );
+    assert!(
+        !init_result.local_config_created,
+        "local.yaml should not be reported as created"
+    );
+    assert!(
+        !init_result.gitignore_created,
+        ".gitignore should not be reported as created"
+    );
 
     // Verify ci.yaml custom content is preserved (not overwritten)
     let preserved_content =
@@ -141,6 +176,14 @@ fn test_init_config_preserves_existing() {
     assert!(
         preserved_local_content.contains("my hook"),
         "Custom hook should be preserved"
+    );
+
+    // Verify .gitignore custom content is preserved (not overwritten)
+    let preserved_gitignore =
+        fs::read_to_string(&gitignore_path).expect("Failed to read .gitignore after second init");
+    assert_eq!(
+        preserved_gitignore, custom_gitignore,
+        ".gitignore should not be overwritten"
     );
 }
 

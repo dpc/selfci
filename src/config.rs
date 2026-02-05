@@ -226,7 +226,18 @@ pub fn read_merged_mq_config(base_workdir: &Path) -> Result<MergedMQConfig, Conf
     ))
 }
 
-pub fn init_config(root_dir: &Path) -> Result<(), ConfigError> {
+/// Result of init_config indicating what was created
+#[derive(Debug, Default)]
+pub struct InitResult {
+    /// Whether ci.yaml was newly created (false if it already existed)
+    pub config_created: bool,
+    /// Whether local.yaml was newly created (false if it already existed)
+    pub local_config_created: bool,
+    /// Whether .gitignore was newly created (false if it already existed)
+    pub gitignore_created: bool,
+}
+
+pub fn init_config(root_dir: &Path) -> Result<InitResult, ConfigError> {
     let mut config_dir = root_dir.to_path_buf();
     for segment in CONFIG_DIR_PATH {
         config_dir.push(segment);
@@ -238,17 +249,22 @@ pub fn init_config(root_dir: &Path) -> Result<(), ConfigError> {
     // Create directory if it doesn't exist
     std::fs::create_dir_all(&config_dir).map_err(ConfigError::ReadFailed)?;
 
+    let mut result = InitResult::default();
+
     // Only write templates if config files don't exist
     if !config_path.exists() {
         std::fs::write(&config_path, CONFIG_TEMPLATE).map_err(ConfigError::ReadFailed)?;
+        result.config_created = true;
     }
     if !local_config_path.exists() {
         std::fs::write(&local_config_path, LOCAL_CONFIG_TEMPLATE)
             .map_err(ConfigError::ReadFailed)?;
+        result.local_config_created = true;
     }
     if !gitignore_path.exists() {
         std::fs::write(&gitignore_path, "local.yaml\n").map_err(ConfigError::ReadFailed)?;
+        result.gitignore_created = true;
     }
 
-    Ok(())
+    Ok(result)
 }
