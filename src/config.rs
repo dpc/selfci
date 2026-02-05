@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::ConfigError;
-use crate::constants::{CONFIG_DIR_PATH, CONFIG_FILENAME, LOCAL_CONFIG_FILENAME};
+use crate::constants::{
+    CONFIG_DIR_PATH, CONFIG_FILENAME, GITIGNORE_FILENAME, LOCAL_CONFIG_FILENAME,
+};
 
 const CONFIG_TEMPLATE: &str = include_str!("../share/ci-template.yaml");
 const LOCAL_CONFIG_TEMPLATE: &str = include_str!("../share/local-template.yaml");
@@ -231,6 +233,7 @@ pub fn init_config(root_dir: &Path) -> Result<(), ConfigError> {
     }
     let config_path = config_dir.join(CONFIG_FILENAME);
     let local_config_path = config_dir.join(LOCAL_CONFIG_FILENAME);
+    let gitignore_path = config_dir.join(GITIGNORE_FILENAME);
 
     // Create directory if it doesn't exist
     std::fs::create_dir_all(&config_dir).map_err(ConfigError::ReadFailed)?;
@@ -242,6 +245,9 @@ pub fn init_config(root_dir: &Path) -> Result<(), ConfigError> {
     if !local_config_path.exists() {
         std::fs::write(&local_config_path, LOCAL_CONFIG_TEMPLATE)
             .map_err(ConfigError::ReadFailed)?;
+    }
+    if !gitignore_path.exists() {
+        std::fs::write(&gitignore_path, "local.yaml\n").map_err(ConfigError::ReadFailed)?;
     }
 
     Ok(())

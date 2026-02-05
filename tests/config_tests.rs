@@ -76,6 +76,17 @@ fn test_init_config() {
         "Local config should contain post-merge hook example"
     );
 
+    // Verify .gitignore was created
+    let gitignore_path = config_dir.join(constants::GITIGNORE_FILENAME);
+    assert!(gitignore_path.exists(), ".gitignore should exist");
+
+    // Verify .gitignore ignores local.yaml
+    let gitignore_content = fs::read_to_string(&gitignore_path).expect("Failed to read .gitignore");
+    assert!(
+        gitignore_content.contains("local.yaml"),
+        ".gitignore should ignore local.yaml"
+    );
+
     // Verify we can parse the config
     let config = read_config(root_path);
     assert!(config.is_ok(), "Should be able to read initialized config");
