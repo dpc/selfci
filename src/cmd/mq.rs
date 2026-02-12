@@ -1,3 +1,4 @@
+use comfy_table::{ContentArrangement, Table, presets};
 use duct::cmd;
 use nix::sys::signal::{self, Signal};
 use nix::sys::stat::{Mode, umask};
@@ -2367,29 +2368,46 @@ pub fn list_runs(limit: Option<usize>) -> Result<(), MainError> {
             if runs.is_empty() {
                 println!("No runs in queue");
             } else {
-                println!(
-                    "{:<6} {:<20} {:<12} {:<10} {:<20} {:<20}",
-                    "ID", "Status", "Change", "Commit", "Candidate", "Queued"
-                );
-                println!("{}", "-".repeat(92));
+                let mut table = Table::new();
+                table
+                    .load_preset(presets::NOTHING)
+                    .set_content_arrangement(ContentArrangement::Dynamic)
+                    .set_header(vec![
+                        "ID",
+                        "Status",
+                        "Change",
+                        "Commit",
+                        "Candidate",
+                        "Queued",
+                    ]);
+
                 for run in runs {
                     let status = run.status.display();
-
                     let queued = humantime::format_rfc3339_seconds(run.queued_at);
                     // Shorten change_id and commit_id to first 8 chars
                     let change_short = &run.candidate.change_id.as_str()
                         [..run.candidate.change_id.as_str().len().min(8)];
                     let commit_short = &run.candidate.commit_id.as_str()
                         [..run.candidate.commit_id.as_str().len().min(8)];
-                    println!(
-                        "{:<6} {:<20} {:<12} {:<10} {:<20} {:<20}",
-                        run.id,
-                        status,
-                        change_short,
-                        commit_short,
-                        run.candidate.user.as_str(),
-                        queued
-                    );
+                    table.add_row(vec![
+                        run.id.to_string(),
+                        status.to_string(),
+                        change_short.to_string(),
+                        commit_short.to_string(),
+                        run.candidate.user.to_string(),
+                        queued.to_string(),
+                    ]);
+                }
+
+                // Print with minimal formatting: header, separator line, data rows
+                let output = format!("{table}");
+                let mut lines = output.lines();
+                if let Some(header) = lines.next() {
+                    println!("{}", header);
+                    println!("{}", "-".repeat(header.len()));
+                    for line in lines {
+                        println!("{}", line);
+                    }
                 }
             }
             Ok(())
