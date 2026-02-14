@@ -2557,10 +2557,13 @@ pub fn stop_daemon() -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
     // Find daemon directory
-    let daemon_dir = get_project_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
-        eprintln!("Merge queue daemon is not running for this project");
-        MainError::CheckFailed
-    })?;
+    let daemon_dir = match get_project_daemon_runtime_dir(&root_dir)? {
+        Some(dir) => dir,
+        None => {
+            println!("Merge queue daemon is not running for this project");
+            return Ok(());
+        }
+    };
 
     let pid_file = daemon_dir.join(constants::MQ_PID_FILENAME);
 
