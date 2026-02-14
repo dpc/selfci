@@ -61,6 +61,7 @@
           "share"
           "tests"
           ".*\.rs"
+          "build.rs"
         ];
 
         buildSrc = flakeboxLib.filterSubPaths {

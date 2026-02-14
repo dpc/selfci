@@ -833,6 +833,10 @@ fn handle_request(
     match request {
         mq_protocol::MQRequest::Hello => mq_protocol::MQResponse::HelloAck,
 
+        mq_protocol::MQRequest::Version => mq_protocol::MQResponse::Version {
+            version: crate::version_string(),
+        },
+
         mq_protocol::MQRequest::AddCandidate {
             candidate,
             no_merge,
@@ -2670,6 +2674,38 @@ pub fn print_pid() -> Result<(), MainError> {
         }
         None => {
             eprintln!("Merge queue daemon is not running for this project");
+            Err(MainError::CheckFailed)
+        }
+    }
+}
+
+pub fn get_daemon_version() -> Result<(), MainError> {
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
+
+    let daemon_dir = get_project_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
+        eprintln!("Merge queue daemon is not running for this project");
+        MainError::CheckFailed
+    })?;
+
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
+
+    let response = mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Version)
+        .map_err(|e| {
+            eprintln!("Failed to communicate with daemon: {}", e);
+            MainError::CheckFailed
+        })?;
+
+    match response {
+        mq_protocol::MQResponse::Version { version } => {
+            println!("selfci {}", version);
+            Ok(())
+        }
+        mq_protocol::MQResponse::Error(e) => {
+            eprintln!("Error: {}", e);
+            Err(MainError::CheckFailed)
+        }
+        _ => {
+            eprintln!("Unexpected response from daemon");
             Err(MainError::CheckFailed)
         }
     }

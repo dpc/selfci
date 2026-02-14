@@ -143,4 +143,6 @@ pub enum MQCommands {
     RuntimeDir,
     /// Print the PID of the running daemon
     Pid,
+    /// Print version of the running daemon
+    Version,
 }

@@ -1,6 +1,10 @@
 mod cmd;
 mod opts;
 
+mod built_info {
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
 use clap::Parser;
 use opts::{Cli, Commands, JobCommands, StepCommands};
 use selfci::{MainError, detect_vcs, envs, init_config, protocol};
@@ -52,7 +56,7 @@ fn main_inner() -> Result<(), MainError> {
 
     match cli.command {
         Commands::Version => {
-            println!("selfci {}", env!("CARGO_PKG_VERSION"));
+            print_version();
         }
         Commands::Init => {
             // Get current directory
@@ -289,8 +293,26 @@ fn main_inner() -> Result<(), MainError> {
             Some(opts::MQCommands::Pid) => {
                 cmd::mq::print_pid()?;
             }
+            Some(opts::MQCommands::Version) => {
+                cmd::mq::get_daemon_version()?;
+            }
         },
     }
 
     Ok(())
+}
+
+/// Get the version string including git commit info
+pub fn version_string() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+
+    match (built_info::GIT_COMMIT_HASH_SHORT, built_info::GIT_DIRTY) {
+        (Some(hash), Some(true)) => format!("{} ({}-modified)", version, hash),
+        (Some(hash), _) => format!("{} ({})", version, hash),
+        _ => version.to_string(),
+    }
+}
+
+fn print_version() {
+    println!("selfci {}", version_string());
 }

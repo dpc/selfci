@@ -128,6 +128,7 @@ pub struct MQRunInfo {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MQRequest {
     Hello,
+    Version,
     AddCandidate { candidate: String, no_merge: bool },
     List { limit: Option<usize> },
     GetStatus { run_id: RunId },
@@ -137,6 +138,7 @@ pub enum MQRequest {
 #[allow(clippy::large_enum_variant)]
 pub enum MQResponse {
     HelloAck,
+    Version { version: String },
     CandidateAdded { run_id: RunId },
     RunList { runs: Vec<MQRunInfo> },
     RunStatus { run: Option<MQRunInfo> },
