@@ -2313,10 +2313,9 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
             match auto_start_daemon(&root_dir)? {
                 Some(dir) => dir,
                 None => {
-                    eprintln!("Merge queue daemon is not running for this project");
                     eprintln!("Start it with: selfci mq start --base-branch <branch>");
                     eprintln!("Or set mq.base-branch in .config/selfci/ci.yaml for auto-start");
-                    return Err(MainError::CheckFailed);
+                    return Err(MainError::DaemonNotRunning);
                 }
             }
         }
@@ -2331,10 +2330,7 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
             no_merge,
         },
     )
-    .map_err(|e| {
-        eprintln!("Error: {}", e);
-        MainError::CheckFailed
-    })?;
+    .map_err(|_| MainError::CommunicationFailed)?;
 
     match response {
         mq_protocol::MQResponse::CandidateAdded { run_id } => {
@@ -2362,19 +2358,14 @@ pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError>
 pub fn list_runs(limit: Option<usize>) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
-    let daemon_dir = get_project_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
-        eprintln!("Merge queue daemon is not running for this project");
-        MainError::CheckFailed
-    })?;
+    let daemon_dir =
+        get_project_daemon_runtime_dir(&root_dir)?.ok_or(MainError::DaemonNotRunning)?;
 
     let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     let response =
         mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::List { limit })
-            .map_err(|e| {
-                eprintln!("Error: {}", e);
-                MainError::CheckFailed
-            })?;
+            .map_err(|_| MainError::CommunicationFailed)?;
 
     match response {
         mq_protocol::MQResponse::RunList { runs } => {
@@ -2439,20 +2430,15 @@ pub fn list_runs(limit: Option<usize>) -> Result<(), MainError> {
 pub fn get_status(run_id: u64) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
-    let daemon_dir = get_project_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
-        eprintln!("Merge queue daemon is not running for this project");
-        MainError::CheckFailed
-    })?;
+    let daemon_dir =
+        get_project_daemon_runtime_dir(&root_dir)?.ok_or(MainError::DaemonNotRunning)?;
 
     let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     let run_id = mq_protocol::RunId(run_id);
     let response =
         mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::GetStatus { run_id })
-            .map_err(|e| {
-                eprintln!("Error: {}", e);
-                MainError::CheckFailed
-            })?;
+            .map_err(|_| MainError::CommunicationFailed)?;
 
     match response {
         mq_protocol::MQResponse::RunStatus { run: Some(run) } => {
@@ -2649,51 +2635,39 @@ pub fn stop_daemon() -> Result<(), MainError> {
 pub fn print_runtime_dir() -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
-    match get_project_daemon_runtime_dir(&root_dir)? {
-        Some(daemon_dir) => {
-            println!("{}", daemon_dir.display());
-            Ok(())
-        }
-        None => {
-            eprintln!("Merge queue daemon is not running for this project");
-            Err(MainError::CheckFailed)
-        }
-    }
+    let daemon_dir =
+        get_project_daemon_runtime_dir(&root_dir)?.ok_or(MainError::DaemonNotRunning)?;
+    println!("{}", daemon_dir.display());
+    Ok(())
 }
 
 /// Print the PID of the running daemon
 pub fn print_pid() -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
-    match get_project_daemon_runtime_dir(&root_dir)? {
-        Some(daemon_dir) => {
-            let pid_file = daemon_dir.join(constants::MQ_PID_FILENAME);
-            let pid = std::fs::read_to_string(&pid_file).map_err(WorkDirError::CreateFailed)?;
-            println!("{}", pid.trim());
-            Ok(())
-        }
-        None => {
-            eprintln!("Merge queue daemon is not running for this project");
-            Err(MainError::CheckFailed)
-        }
-    }
+    let daemon_dir =
+        get_project_daemon_runtime_dir(&root_dir)?.ok_or(MainError::DaemonNotRunning)?;
+    let pid_file = daemon_dir.join(constants::MQ_PID_FILENAME);
+    let pid = std::fs::read_to_string(&pid_file).map_err(WorkDirError::CreateFailed)?;
+    println!("{}", pid.trim());
+    Ok(())
 }
 
 pub fn get_daemon_version() -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
-    let daemon_dir = get_project_daemon_runtime_dir(&root_dir)?.ok_or_else(|| {
-        eprintln!("Merge queue daemon is not running for this project");
-        MainError::CheckFailed
-    })?;
+    let daemon_dir = match get_project_daemon_runtime_dir(&root_dir)? {
+        Some(dir) => dir,
+        None => {
+            println!("Merge queue daemon is not running for this project");
+            return Ok(());
+        }
+    };
 
     let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     let response = mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Version)
-        .map_err(|e| {
-            eprintln!("Failed to communicate with daemon: {}", e);
-            MainError::CheckFailed
-        })?;
+        .map_err(|_| MainError::CommunicationFailed)?;
 
     match response {
         mq_protocol::MQResponse::Version { version } => {
@@ -2702,11 +2676,11 @@ pub fn get_daemon_version() -> Result<(), MainError> {
         }
         mq_protocol::MQResponse::Error(e) => {
             eprintln!("Error: {}", e);
-            Err(MainError::CheckFailed)
+            Err(MainError::CommunicationFailed)
         }
         _ => {
             eprintln!("Unexpected response from daemon");
-            Err(MainError::CheckFailed)
+            Err(MainError::CommunicationFailed)
         }
     }
 }

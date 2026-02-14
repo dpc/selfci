@@ -13,7 +13,7 @@ use std::path::Path;
 
 pub use config::{CloneMode, InitResult, SelfCIConfig, init_config, read_config};
 pub use error::{
-    CheckError, CommandOutputError, ConfigError, MainError, MergeError, VCSError,
+    CheckError, CommandOutputError, ConfigError, MQError, MainError, MergeError, VCSError,
     VCSOperationError, WorkDirError,
 };
 

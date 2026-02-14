@@ -45,12 +45,19 @@ error_set! {
         CheckFailed,
     }
 
+    MQError := {
+        #[display("Merge queue daemon is not running")]
+        DaemonNotRunning,
+        #[display("Failed to communicate with daemon")]
+        CommunicationFailed,
+    }
+
     RevisionError := {
         #[display("Failed to resolve revision")]
         ResolutionFailed(crate::revision::RevisionError),
     }
 
-    MainError := VCSError || WorkDirError || VCSOperationError || ConfigError || CheckError || RevisionError
+    MainError := VCSError || WorkDirError || VCSOperationError || ConfigError || CheckError || MQError || RevisionError
 }
 
 error_set! {
@@ -83,6 +90,8 @@ impl MainError {
             MainError::ReadFailed(_) => crate::exit_codes::EXIT_CONFIG_READ_FAILED,
             MainError::ParseFailed(_) => crate::exit_codes::EXIT_CONFIG_PARSE_FAILED,
             MainError::CheckFailed => crate::exit_codes::EXIT_CHECK_FAILED,
+            MainError::DaemonNotRunning => crate::exit_codes::EXIT_MQ_DAEMON_NOT_RUNNING,
+            MainError::CommunicationFailed => crate::exit_codes::EXIT_MQ_COMMUNICATION_FAILED,
             MainError::ResolutionFailed(e) => match e {
                 crate::revision::RevisionError::ResolutionFailed { .. } => {
                     crate::exit_codes::EXIT_REVISION_RESOLUTION_FAILED
