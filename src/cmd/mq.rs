@@ -48,16 +48,25 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 fn get_project_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>, MainError> {
     // Mode 1: Explicit runtime directory
     if let Ok(explicit_dir) = std::env::var(envs::SELFCI_MQ_RUNTIME_DIR) {
-        let dir = PathBuf::from(explicit_dir);
+        let dir = PathBuf::from(&explicit_dir);
 
         // Verify it's for our project (if initialized)
         let dir_file = dir.join(constants::MQ_DIR_FILENAME);
         if dir_file.exists() {
             let stored_root =
                 std::fs::read_to_string(&dir_file).map_err(WorkDirError::CreateFailed)?;
-            if paths_equal(Path::new(stored_root.trim()), project_root) {
+            let stored_root_trimmed = stored_root.trim();
+            if paths_equal(Path::new(stored_root_trimmed), project_root) {
                 return Ok(Some(dir));
             } else {
+                debug!(
+                    explicit_dir = %explicit_dir,
+                    stored_root = %stored_root_trimmed,
+                    project_root = %project_root.display(),
+                    stored_canonical = ?Path::new(stored_root_trimmed).canonicalize(),
+                    project_canonical = ?project_root.canonicalize(),
+                    "Explicit runtime dir project mismatch"
+                );
                 return Ok(None); // Wrong project
             }
         } else {
