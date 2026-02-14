@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "selfci")]
+#[command(version)]
 #[command(about = "A minimalistic local-first unix-philosophy-abiding CI", long_about = None)]
 pub struct Cli {
     /// Force VCS type (jj or git)
@@ -16,6 +17,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Print version information
+    Version,
     /// Initialize selfci in the current repository
     Init,
     /// Run CI checks

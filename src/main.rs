@@ -51,6 +51,9 @@ fn main_inner() -> Result<(), MainError> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Version => {
+            println!("selfci {}", env!("CARGO_PKG_VERSION"));
+        }
         Commands::Init => {
             // Get current directory
             let root_dir = std::env::current_dir().expect("Failed to get current directory");
