@@ -1166,21 +1166,9 @@ fn process_queue(
             merged_change_id: Some(&merged_change_id),
         };
 
-        // Set up cleanup guard for jj test merge commits
-        // This ensures cleanup happens regardless of check success/failure
-        // NOTE: We use base_branch (ref name) rather than commit ID because the actual
-        // merge (if check passes) will advance main, and we want cleanup to exclude
-        // ancestors of the NEW main (post-merge), not the old one.
-        let _jj_cleanup_guard = if matches!(vcs, selfci::VCS::Jujutsu) {
-            let cleanup_root_dir = root_dir.clone();
-            let cleanup_change_id = merged_change_id.clone();
-            let cleanup_base_ref = base_branch.to_string();
-            Some(scopeguard::guard((), move |_| {
-                cleanup_jj_test_merge(&cleanup_root_dir, &cleanup_change_id, &cleanup_base_ref);
-            }))
-        } else {
-            None
-        };
+        // Note: jj test merge commits are abandoned in run_candidate_check() after
+        // copy_revisions_to_workdirs() exports them to git. This ensures commits are
+        // available for cloning but don't clutter user's jj log during/after tests.
 
         // Create a ResolvedRevision for the merged commit (keeping original user string for display)
         let merged_candidate = selfci::revision::ResolvedRevision {
@@ -1576,14 +1564,15 @@ fn test_merge_git_merge(
     })
 }
 
-/// Clean up temporary jj commits created by test merge
+/// Abandon jj test merge commits so they don't clutter the user's jj log.
+/// Call this AFTER copy_revisions_to_workdirs (which creates bookmarks and exports to git)
+/// but BEFORE running tests. This ensures the commits are exported to git (for cloning)
+/// but hidden from jj log during and after the test run.
+///
 /// For rebase mode: abandons the duplicated commits (entire branch)
 /// For merge mode: abandons the temporary merge commit
-///
-/// The `base_ref` parameter is used to exclude ancestors of the base from abandoning.
-/// It can be a branch name (like "main") or a commit ID.
-pub(crate) fn cleanup_jj_test_merge(root_dir: &Path, test_change_id: &str, base_ref: &str) {
-    debug!(change_id = %test_change_id, base = %base_ref, "Cleaning up jj test merge commits");
+pub(crate) fn abandon_jj_test_merge(root_dir: &Path, test_change_id: &str, base_ref: &str) {
+    debug!(change_id = %test_change_id, base = %base_ref, "Abandoning jj test merge commits");
 
     // Abandon the test merge commit(s)
     // For rebase mode, we need to abandon the entire duplicated branch, not just the tip
@@ -1596,7 +1585,7 @@ pub(crate) fn cleanup_jj_test_merge(root_dir: &Path, test_change_id: &str, base_
         .run()
     {
         Ok(_) => {
-            debug!("Successfully abandoned test merge commit");
+            debug!("Successfully abandoned test merge commits");
         }
         Err(e) => {
             // Non-fatal - the commits will be garbage collected eventually

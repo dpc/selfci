@@ -225,6 +225,16 @@ pub fn run_candidate_check(
         root_config.job.clone_mode,
     )?;
 
+    // For jj: abandon test merge commits after they're exported to git
+    // This ensures commits are cloned but don't clutter user's jj log during tests
+    if matches!(vcs, selfci::VCS::Jujutsu) && original_candidate.is_some() {
+        super::mq::abandon_jj_test_merge(
+            root_dir,
+            candidate_rev.change_id.as_str(),
+            base_rev.commit_id.as_str(),
+        );
+    }
+
     // Run post-clone hook if configured
     let (post_clone_output, post_clone_success) = if let Some(hook_config) = &post_clone_hook {
         debug!("Running post-clone hook");
@@ -664,58 +674,38 @@ pub fn check(
     // Create test merge/rebase of candidate onto base for CI testing
     // This ensures we test what would actually be merged, just like MQ mode
     // Skip test merge if base and candidate are the same commit (nothing to merge)
-    let (merged_candidate, _jj_cleanup_guard): (_, Option<scopeguard::ScopeGuard<(), _>>) =
-        if resolved_base.commit_id == resolved_candidate.commit_id {
-            debug!("Base and candidate are the same commit, skipping test merge");
-            (resolved_candidate.clone(), None)
-        } else {
-            // Use the resolved base commit ID (works with both branch names and commit hashes)
-            let test_merge_result = super::mq::create_test_merge(
-                &root_dir,
-                resolved_base.commit_id.as_str(),
-                &resolved_candidate,
-                &merge_mode,
-            )
-            .map_err(|e| {
-                eprintln!("Failed to create test merge: {}", e);
-                CheckError::CheckFailed
-            })?;
+    let merged_candidate = if resolved_base.commit_id == resolved_candidate.commit_id {
+        debug!("Base and candidate are the same commit, skipping test merge");
+        resolved_candidate.clone()
+    } else {
+        // Use the resolved base commit ID (works with both branch names and commit hashes)
+        let test_merge_result = super::mq::create_test_merge(
+            &root_dir,
+            resolved_base.commit_id.as_str(),
+            &resolved_candidate,
+            &merge_mode,
+        )
+        .map_err(|e| {
+            eprintln!("Failed to create test merge: {}", e);
+            CheckError::CheckFailed
+        })?;
 
-            let merged_commit_id = test_merge_result.commit_id.to_string();
-            let merged_change_id = test_merge_result.change_id.to_string();
+        debug!(
+            merged_commit = %test_merge_result.commit_id,
+            merged_change = %test_merge_result.change_id,
+            "Created test merge"
+        );
 
-            debug!(
-                merged_commit = %merged_commit_id,
-                merged_change = %merged_change_id,
-                "Created test merge"
-            );
-
-            // Set up cleanup guard for jj test merge commits
-            // This ensures cleanup happens regardless of check success/failure
-            let cleanup_guard = if matches!(vcs, selfci::VCS::Jujutsu) {
-                let cleanup_root_dir = root_dir.clone();
-                let cleanup_change_id = merged_change_id.clone();
-                let cleanup_base_commit = resolved_base.commit_id.to_string();
-                Some(scopeguard::guard((), move |_| {
-                    super::mq::cleanup_jj_test_merge(
-                        &cleanup_root_dir,
-                        &cleanup_change_id,
-                        &cleanup_base_commit,
-                    );
-                }))
-            } else {
-                None
-            };
-
-            // Create a ResolvedRevision for the merged commit
-            let merged = selfci::revision::ResolvedRevision {
-                user: resolved_candidate.user.clone(),
-                commit_id: test_merge_result.commit_id,
-                change_id: test_merge_result.change_id,
-            };
-
-            (merged, cleanup_guard)
-        };
+        // Create a ResolvedRevision for the merged commit
+        // Note: jj test merge commits are abandoned immediately after creation,
+        // so they don't clutter the user's jj log. They remain accessible by
+        // change_id/commit_id for the workdir clone.
+        selfci::revision::ResolvedRevision {
+            user: resolved_candidate.user.clone(),
+            commit_id: test_merge_result.commit_id,
+            change_id: test_merge_result.change_id,
+        }
+    };
 
     // Determine parallelism level
     let parallelism = jobs.unwrap_or_else(|| {

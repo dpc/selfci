@@ -76,8 +76,17 @@ pub fn copy_revisions_to_workdirs(
             let base_bookmark = format!("selfci-export-base-{}", suffix);
             let candidate_bookmark = format!("selfci-export-candidate-{}", suffix);
 
-            // Create temporary bookmarks for the revisions we need to export
-            // (jj git export only exports commits reachable from bookmarks)
+            // Create temporary bookmarks for the revisions we need to clone.
+            //
+            // Why bookmarks are needed:
+            // In a colocated jj/git repo, jj stores commits in git's object store. However,
+            // `git clone` only fetches objects that are reachable from refs (branches, tags).
+            // Test merge commits and other "dangling" commits exist in the object store but
+            // aren't reachable from any ref, so `git clone` won't fetch them.
+            //
+            // By creating temporary bookmarks and exporting them via `jj git export`, we make
+            // the commits reachable from git refs, allowing `git clone` to fetch them.
+            // The bookmarks are deleted after cloning completes.
             cmd!(
                 "jj",
                 "bookmark",
@@ -104,7 +113,8 @@ pub fn copy_revisions_to_workdirs(
             .run()
             .map_err(VCSOperationError::CommandFailed)?;
 
-            // Export jj changes to the underlying git repo
+            // Export jj bookmarks to git refs. This makes the commits reachable
+            // from git's perspective, so `git clone` will include them.
             cmd!("jj", "git", "export", "--quiet")
                 .dir(root_dir)
                 .run()
