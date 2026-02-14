@@ -1,8 +1,10 @@
 use selfci::{constants, init_config, read_config};
 use std::fs;
 use tempfile::TempDir;
+use tracing_test::traced_test;
 
 #[test]
+#[traced_test]
 fn test_init_config() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let root_path = temp_dir.path();
@@ -108,6 +110,7 @@ fn test_init_config() {
 }
 
 #[test]
+#[traced_test]
 fn test_init_config_preserves_existing() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let root_path = temp_dir.path();
@@ -188,6 +191,7 @@ fn test_init_config_preserves_existing() {
 }
 
 #[test]
+#[traced_test]
 fn test_read_config_missing() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let result = read_config(temp_dir.path());
@@ -195,6 +199,7 @@ fn test_read_config_missing() {
 }
 
 #[test]
+#[traced_test]
 fn test_unknown_top_level_field() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let root_path = temp_dir.path();
@@ -238,6 +243,7 @@ unknown_field: this should cause an error
 }
 
 #[test]
+#[traced_test]
 fn test_unknown_job_field() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let root_path = temp_dir.path();
@@ -281,6 +287,7 @@ job:
 }
 
 #[test]
+#[traced_test]
 fn test_valid_config_with_all_fields() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let root_path = temp_dir.path();

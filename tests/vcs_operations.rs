@@ -1,10 +1,12 @@
 mod common;
+use tracing_test::traced_test;
 
 use selfci::{CloneMode, VCS, copy_revisions_to_workdirs, revision};
 use std::fs;
 use tempfile::TempDir;
 
 #[test]
+#[traced_test]
 fn test_copy_revisions_jujutsu() {
     let repo = common::setup_jj_repo();
     let base_rev = common::get_jj_base_rev(repo.path());
@@ -58,6 +60,7 @@ fn test_copy_revisions_jujutsu() {
 }
 
 #[test]
+#[traced_test]
 fn test_copy_revisions_git() {
     let repo = common::setup_git_repo();
 

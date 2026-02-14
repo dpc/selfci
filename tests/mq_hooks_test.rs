@@ -1,4 +1,5 @@
 mod common;
+use tracing_test::traced_test;
 
 use common::parse_selfci_env_file;
 use duct::cmd;
@@ -164,6 +165,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_mq_hooks_execution() {
     let repo = setup_git_repo_with_hooks();
     let repo_path = repo.path();
@@ -310,6 +312,7 @@ fn test_mq_hooks_execution() {
 }
 
 #[test]
+#[traced_test]
 fn test_pre_clone_hook_failure() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -431,6 +434,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_pre_merge_hook_failure() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -574,6 +578,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_pre_start_hook_execution() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -648,6 +653,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_pre_start_hook_failure() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -729,6 +735,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_post_start_hook_execution() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -803,6 +810,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_post_start_hook_failure() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -884,6 +892,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_hook_env_vars() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -1060,6 +1069,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_invalid_local_config_fails_daemon_start() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
@@ -1127,6 +1137,7 @@ mq:
 }
 
 #[test]
+#[traced_test]
 fn test_invalid_ci_config_fails_daemon_start() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();

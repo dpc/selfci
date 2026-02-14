@@ -1,4 +1,5 @@
 mod common;
+use tracing_test::traced_test;
 
 use duct::cmd;
 use selfci::constants;
@@ -22,6 +23,7 @@ fn config_path_str() -> String {
 
 /// Test basic candidate check execution with simple command
 #[test]
+#[traced_test]
 fn test_basic_candidate_check_execution() {
     let repo = common::setup_git_repo();
     let repo_path = repo.path();
@@ -107,6 +109,7 @@ job:
 
 /// Integration test for a Git repository with steps and jobs
 #[test]
+#[traced_test]
 fn test_git_repo_with_steps_and_jobs() {
     let repo = common::setup_git_repo();
     let repo_path = repo.path();
@@ -186,6 +189,7 @@ job:
 
 /// Test with failing steps (non-ignored)
 #[test]
+#[traced_test]
 fn test_failing_step() {
     let repo = common::setup_git_repo();
     let repo_path = repo.path();
@@ -256,6 +260,7 @@ job:
 
 /// Test with failing steps (ignored)
 #[test]
+#[traced_test]
 fn test_ignored_failing_step() {
     let repo = common::setup_git_repo();
     let repo_path = repo.path();
@@ -331,6 +336,7 @@ job:
 
 /// Test Jujutsu repository
 #[test]
+#[traced_test]
 fn test_jj_repo_basic() {
     let repo = common::setup_jj_repo();
     let repo_path = repo.path();
@@ -390,6 +396,7 @@ job:
 
 /// Test merge queue functionality end-to-end
 #[test]
+#[traced_test]
 fn test_merge_queue_flow() {
     use std::process::{Command, Stdio};
     use std::thread;
@@ -658,6 +665,7 @@ job:
 /// 3. Running check with base=HEAD^ and candidate=HEAD
 /// 4. Verifying the strict base config is used (job fails), not the lax candidate config
 #[test]
+#[traced_test]
 fn test_config_read_from_base_security() {
     let repo = common::setup_git_repo();
     let repo_path = repo.path();
@@ -759,6 +767,7 @@ job:
 
 /// Test that candidate environment variables are passed to jobs
 #[test]
+#[traced_test]
 fn test_candidate_env_vars_passed_to_jobs() {
     let repo = common::setup_git_repo();
     let repo_path = repo.path();

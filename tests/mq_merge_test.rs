@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+use tracing::info;
+use tracing_test::traced_test;
 
 /// Helper to get the selfci binary path
 fn selfci_bin() -> String {
@@ -613,11 +615,13 @@ fn run_jj_merge_test(merge_mode: &str, num_candidates: usize) {
 // ============================================================================
 
 #[test]
+#[traced_test]
 fn test_git_rebase_merge_single() {
     run_git_merge_test("rebase", 1);
 }
 
 #[test]
+#[traced_test]
 fn test_git_rebase_merge_multi() {
     run_git_merge_test("rebase", 5);
 }
@@ -627,11 +631,13 @@ fn test_git_rebase_merge_multi() {
 // ============================================================================
 
 #[test]
+#[traced_test]
 fn test_git_merge_merge_single() {
     run_git_merge_test("merge", 1);
 }
 
 #[test]
+#[traced_test]
 fn test_git_merge_merge_multi() {
     run_git_merge_test("merge", 5);
 }
@@ -641,11 +647,13 @@ fn test_git_merge_merge_multi() {
 // ============================================================================
 
 #[test]
+#[traced_test]
 fn test_jj_rebase_merge_single() {
     run_jj_merge_test("rebase", 1);
 }
 
 #[test]
+#[traced_test]
 fn test_jj_rebase_merge_multi() {
     run_jj_merge_test("rebase", 5);
 }
@@ -655,11 +663,13 @@ fn test_jj_rebase_merge_multi() {
 // ============================================================================
 
 #[test]
+#[traced_test]
 fn test_jj_merge_merge_single() {
     run_jj_merge_test("merge", 1);
 }
 
 #[test]
+#[traced_test]
 fn test_jj_merge_merge_multi() {
     run_jj_merge_test("merge", 5);
 }
@@ -670,6 +680,7 @@ fn test_jj_merge_merge_multi() {
 
 /// Test that stopping the MQ daemon via command works correctly
 #[test]
+#[traced_test]
 fn test_mq_stop_via_command() {
     let repo = setup_git_base_repo("rebase");
     let repo_path = repo.path();
@@ -699,6 +710,7 @@ fn test_mq_stop_via_command() {
 
 /// Test that stopping the MQ daemon via SIGTERM signal works correctly
 #[test]
+#[traced_test]
 fn test_mq_stop_via_signal() {
     use nix::sys::signal::{self, Signal};
     use nix::unistd::Pid;
@@ -749,15 +761,18 @@ fn test_mq_stop_via_signal() {
 
 /// Test that stopping the MQ daemon in foreground mode via command works correctly
 #[test]
+#[traced_test]
 fn test_mq_stop_foreground_via_command() {
     let repo = setup_git_base_repo("rebase");
     let repo_path = repo.path();
+    info!(repo_path = %repo_path.display(), "Test started");
 
     // Use explicit runtime directory so we know where to poll for socket
     let runtime_dir = repo_path.join(".selfci-mq-runtime");
 
     // Start daemon in foreground mode (runs as direct child process)
     // Use stdin/stdout/stderr_null to avoid blocking on IO
+    info!(runtime_dir = %runtime_dir.display(), "Starting daemon in foreground mode");
     let _handle = cmd!(selfci_bin(), "mq", "start", "-f")
         .dir(repo_path)
         .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
@@ -766,9 +781,12 @@ fn test_mq_stop_foreground_via_command() {
         .stderr_null()
         .start()
         .unwrap();
+    info!("Waiting for daemon to be ready");
     wait_for_daemon_ready_with_env(repo_path, &runtime_dir, 10);
+    info!("Daemon is ready");
 
     // Stop via command (must use same runtime dir)
+    info!("Stopping daemon via command");
     let start = std::time::Instant::now();
     cmd!(selfci_bin(), "mq", "stop")
         .dir(repo_path)
@@ -776,6 +794,7 @@ fn test_mq_stop_foreground_via_command() {
         .run()
         .unwrap();
     let elapsed = start.elapsed();
+    info!(?elapsed, "Daemon stopped");
 
     // Should stop quickly (under 5 seconds)
     assert!(
@@ -787,6 +806,7 @@ fn test_mq_stop_foreground_via_command() {
 
 /// Test that stopping the MQ daemon in foreground mode via SIGTERM signal works correctly
 #[test]
+#[traced_test]
 fn test_mq_stop_foreground_via_signal() {
     use nix::sys::signal::{self, Signal};
     use nix::unistd::Pid;
@@ -850,6 +870,7 @@ fn test_mq_stop_foreground_via_signal() {
 
 /// Test basic daemon start and helper commands (runtime-dir, pid)
 #[test]
+#[traced_test]
 fn test_mq_start_and_helper_commands() {
     let repo = setup_git_base_repo("rebase");
     let repo_path = repo.path();
@@ -914,6 +935,7 @@ fn test_mq_start_and_helper_commands() {
 
 /// Test that starting daemon when already running is idempotent
 #[test]
+#[traced_test]
 fn test_mq_start_already_running() {
     let repo = setup_git_base_repo("rebase");
     let repo_path = repo.path();
@@ -958,6 +980,7 @@ fn test_mq_start_already_running() {
 
 /// Test auto-start: daemon starts automatically when running `mq add` without daemon
 #[test]
+#[traced_test]
 fn test_mq_auto_start() {
     let repo = setup_git_base_repo("rebase");
     let repo_path = repo.path();
@@ -1016,6 +1039,7 @@ fn test_mq_auto_start() {
 
 /// Test daemon lifecycle with explicit SELFCI_MQ_RUNTIME_DIR
 #[test]
+#[traced_test]
 fn test_mq_explicit_runtime_dir() {
     let repo = setup_git_base_repo("rebase");
     let repo_path = repo.path();

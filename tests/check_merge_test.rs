@@ -1,4 +1,5 @@
 mod common;
+use tracing_test::traced_test;
 
 use common::parse_selfci_env_file;
 use duct::cmd;
@@ -353,6 +354,7 @@ fn verify_env_vars(repo_path: &Path) {
 }
 
 #[test]
+#[traced_test]
 fn test_git_check_rebase() {
     let repo = setup_git_check_repo("rebase");
     let repo_path = repo.path();
@@ -387,6 +389,7 @@ fn test_git_check_rebase() {
 }
 
 #[test]
+#[traced_test]
 fn test_git_check_merge() {
     let repo = setup_git_check_repo("merge");
     let repo_path = repo.path();
@@ -421,6 +424,7 @@ fn test_git_check_merge() {
 }
 
 #[test]
+#[traced_test]
 fn test_jj_check_rebase() {
     let repo = setup_jj_check_repo("rebase");
     let repo_path = repo.path();
@@ -459,6 +463,7 @@ fn test_jj_check_rebase() {
 }
 
 #[test]
+#[traced_test]
 fn test_jj_check_merge() {
     let repo = setup_jj_check_repo("merge");
     let repo_path = repo.path();
@@ -498,6 +503,7 @@ fn test_jj_check_merge() {
 
 /// Test that jj test merge commits are cleaned up after check
 #[test]
+#[traced_test]
 fn test_jj_check_cleanup() {
     let repo = setup_jj_check_repo("rebase");
     let repo_path = repo.path();
@@ -589,6 +595,7 @@ fn test_jj_check_cleanup() {
 
 /// Test that when base and candidate are the same, SELFCI_MERGED_* is not set
 #[test]
+#[traced_test]
 fn test_git_check_same_base_candidate() {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
