@@ -58,7 +58,7 @@ fn wait_for_job_completion_with_output(
             .ok();
 
         if let Some(ref out) = output
-            && (out.contains("Status: Passed") || out.contains("Status: Failed"))
+            && (out.contains("Status: Success") || out.contains("Status: Failed"))
         {
             return output;
         }
@@ -206,7 +206,7 @@ fn test_mq_hooks_execution() {
 
     // Verify job passed and was merged
     assert!(
-        status_output.contains("Status: Passed: merged"),
+        status_output.contains("Status: Success: merged"),
         "Job should have passed with merged status, got: {}",
         status_output
     );
@@ -1007,7 +1007,7 @@ mq:
 
     // Verify job passed
     assert!(
-        status_output.contains("Status: Passed"),
+        status_output.contains("Status: Success"),
         "Job should have passed, got: {}",
         status_output
     );

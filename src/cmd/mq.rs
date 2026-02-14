@@ -1342,9 +1342,16 @@ fn process_queue(
                                         // but log the hook failure
                                     }
 
-                                    run_info.status = mq_protocol::MQRunStatus::Passed(
-                                        mq_protocol::PassedReason::Merged,
-                                    );
+                                    let passed_reason = match merge_mode {
+                                        selfci::config::MergeMode::Rebase => {
+                                            mq_protocol::PassedReason::Rebased
+                                        }
+                                        selfci::config::MergeMode::Merge => {
+                                            mq_protocol::PassedReason::Merged
+                                        }
+                                    };
+                                    run_info.status =
+                                        mq_protocol::MQRunStatus::Passed(passed_reason);
                                 }
                                 Err(e) => {
                                     run_info

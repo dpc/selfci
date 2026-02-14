@@ -538,7 +538,7 @@ job:
             .read()
             .expect("Failed to get status");
 
-        if status_output.contains("Status: Failed") || status_output.contains("Status: Passed") {
+        if status_output.contains("Status: Failed") || status_output.contains("Status: Success") {
             run_status = status_output;
             break;
         }
@@ -605,7 +605,7 @@ job:
             .read()
             .expect("Failed to get status");
 
-        if status_output.contains("Status: Failed") || status_output.contains("Status: Passed") {
+        if status_output.contains("Status: Failed") || status_output.contains("Status: Success") {
             passing_run_status = status_output;
             break;
         }
@@ -619,7 +619,7 @@ job:
 
     // Verify run passed
     assert!(
-        passing_run_status.contains("Status: Passed"),
+        passing_run_status.contains("Status: Success"),
         "Run should have passed"
     );
     assert!(

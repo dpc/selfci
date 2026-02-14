@@ -79,9 +79,9 @@ fn wait_for_run_completion(repo_path: &Path, run_id: u64, timeout_secs: u64) -> 
             .ok();
 
         if let Some(output) = output
-            && (output.contains("Status: Passed") || output.contains("Status: Failed"))
+            && (output.contains("Status: Success") || output.contains("Status: Failed"))
         {
-            return output.contains("Status: Passed");
+            return output.contains("Status: Success");
         }
 
         thread::sleep(Duration::from_millis(100));

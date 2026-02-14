@@ -22,6 +22,8 @@ impl std::fmt::Display for RunId {
 pub enum PassedReason {
     /// Run passed and was merged into base branch
     Merged,
+    /// Run passed and was rebased onto base branch
+    Rebased,
     /// Run passed but merge was skipped (--no-merge flag)
     NoMerge,
 }
@@ -65,9 +67,10 @@ impl MQRunStatus {
             MQRunStatus::Passed(reason) => {
                 let reason_str = match reason {
                     PassedReason::Merged => "merged",
-                    PassedReason::NoMerge => "no-merge",
+                    PassedReason::Rebased => "rebased",
+                    PassedReason::NoMerge => "checked",
                 };
-                format!("Passed: {}", reason_str)
+                format!("Success: {}", reason_str)
             }
             MQRunStatus::Failed(reason) => {
                 let reason_str = match reason {
