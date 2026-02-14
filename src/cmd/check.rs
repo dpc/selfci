@@ -32,6 +32,7 @@ pub enum CheckMode {
 pub struct CheckResult {
     pub output: String,
     pub steps: Vec<protocol::StepLogEntry>,
+    pub jobs: Vec<protocol::CompletedJob>,
     pub exit_code: Option<i32>,
     pub duration: Duration,
     /// Post-clone hook output (if hook was run)
@@ -254,6 +255,7 @@ pub fn run_candidate_check(
         return Ok(CheckResult {
             output: String::new(),
             steps: Vec::new(),
+            jobs: Vec::new(),
             exit_code: Some(1),
             duration: Duration::ZERO,
             post_clone_output,
@@ -379,6 +381,7 @@ pub fn run_candidate_check(
     let mut total_jobs = 0;
     let mut all_outputs = String::new();
     let mut all_steps = Vec::new();
+    let mut all_jobs = Vec::new();
     let mut any_job_failed = false;
     let check_start = std::time::Instant::now();
 
@@ -500,7 +503,12 @@ pub fn run_candidate_check(
                     }
                 }
 
-                all_steps.extend(outcome.steps.clone());
+                // Prefix step names with job name for display
+                all_steps.extend(outcome.steps.iter().map(|step| {
+                    let mut step = step.clone();
+                    step.name = format!("{}/{}", outcome.job_name, step.name);
+                    step
+                }));
 
                 let has_failed_step = outcome.steps.iter().any(|step| {
                     matches!(step.status, protocol::StepStatus::Failed { ignored: false })
@@ -516,15 +524,20 @@ pub fn run_candidate_check(
                 }
 
                 // Record job completion status for wait command
+                let job_status = if job_failed {
+                    protocol::JobStatus::Failed
+                } else {
+                    protocol::JobStatus::Succeeded
+                };
                 shared_job_states.with_mut(|s| {
-                    s.completions.insert(
-                        outcome.job_name.clone(),
-                        if job_failed {
-                            protocol::JobStatus::Failed
-                        } else {
-                            protocol::JobStatus::Succeeded
-                        },
-                    );
+                    s.completions
+                        .insert(outcome.job_name.clone(), job_status.clone());
+                });
+
+                // Track completed job
+                all_jobs.push(protocol::CompletedJob {
+                    name: outcome.job_name.clone(),
+                    status: job_status,
                 });
 
                 // Output job completion status
@@ -610,6 +623,7 @@ pub fn run_candidate_check(
     Ok(CheckResult {
         output: all_outputs,
         steps: all_steps,
+        jobs: all_jobs,
         exit_code: if any_job_failed { Some(1) } else { Some(0) },
         duration: total_duration,
         post_clone_output,

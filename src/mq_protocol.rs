@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::SystemTime;
 
-use crate::protocol::StepLogEntry;
+use crate::protocol::{CompletedJob, StepLogEntry};
 use crate::revision::ResolvedRevision;
 
 /// Unique identifier for an MQ run (a candidate submitted via `selfci mq add`)
@@ -113,6 +113,12 @@ pub struct MQRunInfo {
     pub output: String,
     /// Active jobs within this run (for display purposes)
     pub active_jobs: Vec<StepLogEntry>,
+    /// Completed steps from the check (for showing failed steps summary)
+    #[serde(default)]
+    pub completed_steps: Vec<StepLogEntry>,
+    /// Completed jobs from the check
+    #[serde(default)]
+    pub completed_jobs: Vec<CompletedJob>,
     pub no_merge: bool,
 }
 
@@ -125,6 +131,7 @@ pub enum MQRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum MQResponse {
     HelloAck,
     CandidateAdded { run_id: RunId },

@@ -691,3 +691,60 @@ fn test_git_check_same_base_candidate() {
         merged_commit
     );
 }
+
+/// Test that step names in output include job prefix (main/stepname format)
+#[test]
+#[traced_test]
+fn test_step_names_include_job_prefix() {
+    let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let repo_path = repo_dir.path();
+
+    // Initialize git repo
+    cmd!("git", "init").dir(repo_path).run().unwrap();
+    cmd!("git", "config", "user.name", "Test User")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("git", "config", "user.email", "test@example.com")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Create config with CI command that logs a step
+    // The command logs a step called "build" and then succeeds
+    fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
+    let selfci = selfci_bin();
+    fs::write(
+        repo_path.join(".config/selfci/ci.yaml"),
+        format!(
+            r#"job:
+  command: '{selfci} step start build && echo "build done"'
+"#,
+        ),
+    )
+    .unwrap();
+
+    // Create initial commit
+    fs::write(repo_path.join("main.txt"), "main content").unwrap();
+    cmd!("git", "add", ".").dir(repo_path).run().unwrap();
+    cmd!("git", "commit", "-m", "Initial commit")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    // Run selfci check
+    let output = cmd!(selfci_bin(), "check", "--root", repo_path)
+        .stderr_to_stdout()
+        .unchecked()
+        .read()
+        .expect("Failed to run selfci check");
+
+    eprintln!("Output:\n{}", output);
+
+    // Verify the output contains step in "main/build" format
+    assert!(
+        output.contains("main/build"),
+        "Step name should be prefixed with job name (main/build), got:\n{}",
+        output
+    );
+}

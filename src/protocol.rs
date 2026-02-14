@@ -36,6 +36,12 @@ pub enum JobStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletedJob {
+    pub name: String,
+    pub status: JobStatus,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum JobControlResponse {
     JobStarted,

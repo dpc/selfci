@@ -156,6 +156,8 @@ impl MQState {
             test_merge_output: String::new(),
             output: String::new(),
             active_jobs: Vec::new(),
+            completed_steps: Vec::new(),
+            completed_jobs: Vec::new(),
             no_merge,
         };
 
@@ -1261,6 +1263,8 @@ fn process_queue(
                 // Append check output to job output (preserving hook outputs)
                 run_info.output.push_str(&result.output);
                 run_info.active_jobs = Vec::new(); // Active jobs list is only populated for status queries
+                run_info.completed_steps = result.steps.clone(); // Store completed steps for status display
+                run_info.completed_jobs = result.jobs.clone(); // Store completed jobs for status display
                 run_info.completed_at = Some(SystemTime::now());
 
                 if job_passed {
@@ -2508,6 +2512,28 @@ pub fn get_status(run_id: u64) -> Result<(), MainError> {
             if !run.output.is_empty() {
                 println!("\n### Check Output\n");
                 println!("{}", run.output);
+            }
+
+            // Show failed steps and jobs summary
+            let failed_steps: Vec<_> = run
+                .completed_steps
+                .iter()
+                .filter(|step| {
+                    matches!(step.status, protocol::StepStatus::Failed { ignored: false })
+                })
+                .map(|step| step.name.as_str())
+                .collect();
+            let failed_jobs: Vec<_> = run
+                .completed_jobs
+                .iter()
+                .filter(|job| matches!(job.status, protocol::JobStatus::Failed))
+                .map(|job| job.name.as_str())
+                .collect();
+            if !failed_steps.is_empty() || !failed_jobs.is_empty() {
+                let mut failed_items = Vec::new();
+                failed_items.extend(failed_steps);
+                failed_items.extend(failed_jobs);
+                println!("\nFailed: {}", failed_items.join(", "));
             }
 
             Ok(())
