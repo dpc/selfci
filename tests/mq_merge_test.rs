@@ -24,12 +24,13 @@ fn wait_for_daemon_ready(repo_path: &Path, timeout_secs: u64) {
     while start.elapsed().as_secs() < timeout_secs {
         // mq list will find daemon via mq.dir (written before fork) and connect to socket
         // This blocks until daemon's accept loop is running (after initialization)
-        let output = cmd!(selfci_bin(), "mq", "list")
+        // Note: Don't use .unchecked() - we need .read() to return Err on non-zero exit
+        let result = cmd!(selfci_bin(), "mq", "list")
             .dir(repo_path)
-            .unchecked()
-            .stderr_to_stdout()
-            .read();
-        if output.is_ok() {
+            .stderr_null()
+            .stdout_null()
+            .run();
+        if result.is_ok() {
             return;
         }
         thread::sleep(Duration::from_millis(50));
@@ -44,13 +45,14 @@ fn wait_for_daemon_ready(repo_path: &Path, timeout_secs: u64) {
 fn wait_for_daemon_ready_with_env(repo_path: &Path, runtime_dir: &Path, timeout_secs: u64) {
     let start = std::time::Instant::now();
     while start.elapsed().as_secs() < timeout_secs {
-        let output = cmd!(selfci_bin(), "mq", "list")
+        // Note: Don't use .unchecked() - we need .run() to return Err on non-zero exit
+        let result = cmd!(selfci_bin(), "mq", "list")
             .dir(repo_path)
             .env("SELFCI_MQ_RUNTIME_DIR", runtime_dir)
-            .unchecked()
-            .stderr_to_stdout()
-            .read();
-        if output.is_ok() {
+            .stderr_null()
+            .stdout_null()
+            .run();
+        if result.is_ok() {
             return;
         }
         thread::sleep(Duration::from_millis(50));
