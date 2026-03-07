@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-06
+
+### Added
+
+- `selfci --version` flag
+- Build hash output in `--version` and `mq version`
+- Display failing steps at the bottom of `mq status`
+
+### Changed
+
+- Improved status names in `mq list`
+
+### Fixed
+
+- Incorrect/improved error messages
+
 ## [0.3.0] - 2026-02-12
 
 ### Added
@@ -70,7 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Daemonized merge queue with proper process management
 
 <!-- TODO: Switch to Radicle links when it supports linking to tags -->
-[Unreleased]: https://github.com/dpc/selfci/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/dpc/selfci/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dpc/selfci/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/dpc/selfci/releases/tag/v0.3.0
 [0.2.0]: https://github.com/dpc/selfci/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dpc/selfci/releases/tag/v0.1.0
