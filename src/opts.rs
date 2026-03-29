@@ -114,8 +114,8 @@ pub enum MQCommands {
     },
     /// Add a candidate to the merge queue
     Add {
-        /// Candidate revision to check and merge
-        candidate: String,
+        /// Candidate revision to check and merge (default: `@-` for jj, `HEAD` for git)
+        candidate: Option<String>,
 
         /// Don't merge even if check passes (dry-run)
         #[arg(long)]
@@ -123,8 +123,8 @@ pub enum MQCommands {
     },
     /// Check a candidate without merging (alias for `add --no-merge`)
     Check {
-        /// Candidate revision to check
-        candidate: String,
+        /// Candidate revision to check (default: `@-` for jj, `HEAD` for git)
+        candidate: Option<String>,
     },
     /// List jobs in the merge queue
     List {

@@ -2302,8 +2302,19 @@ fn merge_candidate(
     }
 }
 
-pub fn add_candidate(candidate: String, no_merge: bool) -> Result<(), MainError> {
+pub fn add_candidate(candidate: Option<String>, no_merge: bool) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
+
+    let candidate = match candidate {
+        Some(c) => c,
+        None => {
+            let vcs = get_vcs(&root_dir, None)?;
+            match vcs {
+                selfci::VCS::Jujutsu => "@-".to_string(),
+                selfci::VCS::Git => "HEAD".to_string(),
+            }
+        }
+    };
 
     // Try to get existing daemon, or auto-start if config has base-branch
     let daemon_dir = match get_project_daemon_runtime_dir(&root_dir)? {
