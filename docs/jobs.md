@@ -31,7 +31,9 @@ The job command runs in the candidate worktree directory. After the check comple
 
 ## Environment Variables
 
-The following environment variables are available to job commands:
+The following environment variables are available to job commands.
+
+`SELFCI_VERSION` is always set (see [environment.md](environment.md)).
 
 | Variable | Description |
 |----------|-------------|

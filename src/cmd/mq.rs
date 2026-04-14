@@ -947,9 +947,7 @@ fn run_hook_with_env(
 
     // Build command with optional candidate environment variables
     let mut command = cmd(&full_command[0], &full_command[1..]);
-    command = command
-        .dir(root_dir)
-        .env(envs::SELFCI_VERSION, env!("CARGO_PKG_VERSION"));
+    command = command.dir(root_dir);
 
     if let Some(env) = candidate_env {
         command = command
@@ -1025,7 +1023,6 @@ fn run_hook_interactive(
     // Run with inherited stdio - no capture, allows user interaction
     let result = cmd(&full_command[0], &full_command[1..])
         .dir(root_dir)
-        .env(envs::SELFCI_VERSION, env!("CARGO_PKG_VERSION"))
         .unchecked()
         .run();
 

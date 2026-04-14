@@ -83,6 +83,8 @@ Unlike jobs, hooks run in the repository's root directory (the original repo, no
 
 ## Environment Variables
 
+`SELFCI_VERSION` is always set for all hooks (see [environment.md](environment.md)).
+
 ### Startup Hooks (pre-start, post-start)
 
 No candidate-specific environment variables are set since these run once at daemon startup.

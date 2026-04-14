@@ -12,6 +12,12 @@ use std::error::Error;
 use std::path::PathBuf;
 
 fn main() {
+    // Set SELFCI_VERSION for all child processes
+    // SAFETY: called before any threads are spawned
+    unsafe {
+        std::env::set_var(envs::SELFCI_VERSION, version_string());
+    }
+
     // Initialize tracing subscriber
     // Use SELFCI_LOG env var (falls back to INFO level if not set)
     let env_filter = std::env::var(envs::SELFCI_LOG)

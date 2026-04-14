@@ -45,5 +45,5 @@ pub const SELFCI_ROOT_DIR: &str = "SELFCI_ROOT_DIR";
 /// Explicit runtime directory for MQ daemon (optional)
 pub const SELFCI_MQ_RUNTIME_DIR: &str = "SELFCI_MQ_RUNTIME_DIR";
 
-/// Version of selfci (set by selfci when running hooks and jobs)
+/// Version of selfci (set at process startup, inherited by all child processes)
 pub const SELFCI_VERSION: &str = "SELFCI_VERSION";
