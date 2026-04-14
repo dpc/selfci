@@ -86,7 +86,7 @@ pub fn copy_revisions_to_workdirs(
             //
             // By creating temporary bookmarks and exporting them via `jj git export`, we make
             // the commits reachable from git refs, allowing `git clone` to fetch them.
-            // The bookmarks are deleted after cloning completes.
+            // The bookmarks are deleted after cloning completes (or on error).
             cmd!(
                 "jj",
                 "bookmark",
@@ -112,6 +112,20 @@ pub fn copy_revisions_to_workdirs(
             .dir(root_dir)
             .run()
             .map_err(VCSOperationError::CommandFailed)?;
+
+            // Guard bookmark cleanup so it runs even if subsequent operations fail.
+            // Without this, errors in git export or clone leave stale bookmarks behind.
+            let root_dir_owned = root_dir.to_path_buf();
+            let base_bm = base_bookmark.clone();
+            let candidate_bm = candidate_bookmark.clone();
+            let _bookmark_cleanup = scopeguard::guard((), move |_| {
+                let _ = cmd!("jj", "bookmark", "delete", "--quiet", &base_bm)
+                    .dir(&root_dir_owned)
+                    .run();
+                let _ = cmd!("jj", "bookmark", "delete", "--quiet", &candidate_bm)
+                    .dir(&root_dir_owned)
+                    .run();
+            });
 
             // Export jj bookmarks to git refs. This makes the commits reachable
             // from git's perspective, so `git clone` will include them.
@@ -145,15 +159,7 @@ pub fn copy_revisions_to_workdirs(
                 clone_mode,
             )?;
 
-            // Delete the temporary bookmarks (cleanup)
-            let _ = cmd!("jj", "bookmark", "delete", "--quiet", &base_bookmark)
-                .dir(root_dir)
-                .run();
-
-            let _ = cmd!("jj", "bookmark", "delete", "--quiet", &candidate_bookmark)
-                .dir(root_dir)
-                .run();
-
+            // _bookmark_cleanup guard runs here on drop (success or error)
             Ok(())
         }
         VCS::Git => {

@@ -1,8 +1,10 @@
 mod common;
 use tracing_test::traced_test;
 
+use duct::cmd;
 use selfci::{CloneMode, VCS, copy_revisions_to_workdirs, revision};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 #[test]
@@ -110,4 +112,85 @@ fn test_copy_revisions_git() {
     let candidate_content =
         fs::read_to_string(&candidate_file).expect("Failed to read candidate file");
     assert_eq!(candidate_content, "candidate content");
+}
+
+/// Regression test: verify that temporary jj bookmarks are cleaned up even when
+/// git clone fails during copy_revisions_to_workdirs.
+///
+/// Previously, bookmark cleanup was only on the success path. If git clone failed
+/// after bookmarks were created, they were left behind as stale refs.
+#[test]
+#[traced_test]
+fn test_jj_bookmark_cleanup_on_clone_failure() {
+    let repo = common::setup_jj_repo();
+    let repo_path = repo.path();
+    let selfci_bin = env!("CARGO_BIN_EXE_selfci");
+
+    // Create a fake git wrapper that fails on clone but passes everything else
+    // through. This simulates the error path in copy_revisions_to_workdirs after
+    // bookmarks have been created and exported.
+    let wrapper_dir = TempDir::new().expect("Failed to create wrapper dir");
+    let wrapper_dir_str = wrapper_dir.path().display().to_string();
+    // The wrapper removes its own directory from PATH before delegating to the
+    // real git, so we don't need to know the absolute path of git ahead of time.
+    let wrapper_script = format!(
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do\n\
+         \x20 if [ \"$arg\" = \"clone\" ]; then\n\
+         \x20   echo \"fake git: simulating clone failure\" >&2\n\
+         \x20   exit 1\n\
+         \x20 fi\n\
+         done\n\
+         # Remove wrapper dir from PATH so we find the real git\n\
+         PATH=$(echo \"$PATH\" | tr ':' '\\n' | grep -v '{}' | tr '\\n' ':')\n\
+         exec git \"$@\"\n",
+        wrapper_dir_str.replace('/', "\\/")
+    );
+    let wrapper_path = wrapper_dir.path().join("git");
+    fs::write(&wrapper_path, &wrapper_script).expect("Failed to write git wrapper");
+    fs::set_permissions(&wrapper_path, fs::Permissions::from_mode(0o755))
+        .expect("Failed to set wrapper permissions");
+
+    // Build PATH with wrapper dir prepended
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let modified_path = format!("{}:{}", wrapper_dir_str, original_path);
+
+    // Run selfci check with the broken git -- this should fail
+    let result = cmd!(
+        selfci_bin,
+        "check",
+        "--root",
+        repo_path,
+        "--base",
+        "@-",
+        "--candidate",
+        "@"
+    )
+    .env("PATH", &modified_path)
+    .stderr_to_stdout()
+    .unchecked()
+    .run()
+    .expect("Failed to run selfci");
+
+    assert!(
+        !result.status.success(),
+        "selfci check should fail with broken git clone"
+    );
+
+    // Verify no selfci-export-* bookmarks remain
+    let bookmarks = cmd!("jj", "bookmark", "list")
+        .dir(repo_path)
+        .read()
+        .expect("Failed to list bookmarks");
+
+    let stale_bookmarks: Vec<&str> = bookmarks
+        .lines()
+        .filter(|line| line.contains("selfci-export-"))
+        .collect();
+
+    assert!(
+        stale_bookmarks.is_empty(),
+        "No selfci-export-* bookmarks should remain after failed clone, but found:\n{}",
+        stale_bookmarks.join("\n")
+    );
 }
