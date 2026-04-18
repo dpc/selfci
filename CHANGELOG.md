@@ -5,7 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-04-18
+
+### Added
+
+* Added `selfci mq wait [run_id]` command to block until a run completes.
+* Added `SELFCI_VERSION` environment variable set at process startup, inherited by all child processes.
+* Added `docs/environment.md` documenting all environment variables.
+
+### Changed
+
+* `selfci mq add` and `selfci mq check` now default to `@-` (jj) or `HEAD` (git) when no candidate argument is provided.
+
+### Fixed
+
+* Temporary jj bookmarks are now cleaned up even when git clone fails.
 
 ## [0.4.0] - 2026-03-06
 
