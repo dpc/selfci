@@ -137,6 +137,11 @@ pub enum MQCommands {
         /// Run ID to query
         run_id: u64,
     },
+    /// Wait for a run to complete (defaults to latest run)
+    Wait {
+        /// Run ID to wait for (defaults to the latest run)
+        run_id: Option<u64>,
+    },
     /// Stop the merge queue daemon
     Stop,
     /// Print the runtime directory for the daemon

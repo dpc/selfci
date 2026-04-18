@@ -16,3 +16,5 @@ pub const EXIT_JOB_WAIT_FAILED: i32 = 13;
 pub const EXIT_MERGE_FAILED: i32 = 14;
 pub const EXIT_MQ_DAEMON_NOT_RUNNING: i32 = 15;
 pub const EXIT_MQ_COMMUNICATION_FAILED: i32 = 16;
+pub const EXIT_MQ_WAIT_FAILED: i32 = 17;
+pub const EXIT_MQ_RUN_NOT_FOUND: i32 = 18;

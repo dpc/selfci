@@ -132,6 +132,7 @@ pub enum MQRequest {
     AddCandidate { candidate: String, no_merge: bool },
     List { limit: Option<usize> },
     GetStatus { run_id: RunId },
+    WaitForRun { run_id: RunId },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

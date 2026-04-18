@@ -290,6 +290,9 @@ fn main_inner() -> Result<(), MainError> {
             Some(opts::MQCommands::Status { run_id }) => {
                 cmd::mq::get_status(run_id)?;
             }
+            Some(opts::MQCommands::Wait { run_id }) => {
+                cmd::mq::wait_for_run(run_id)?;
+            }
             Some(opts::MQCommands::Stop) => {
                 cmd::mq::stop_daemon()?;
             }

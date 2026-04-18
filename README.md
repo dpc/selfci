@@ -201,6 +201,10 @@ The mq daemon will run the candidate check against the base branch
 and merge passing changes into the base branch. This allows conveniently merging changes
 without the need to babysit and wait for things to finish.
 
+`selfci mq wait [run_id]` blocks until the given run completes, exiting 0
+on success and non-zero on failure. When no run ID is given it defaults to
+the latest run.
+
 
 ### "Bring your own isolation" and security
 

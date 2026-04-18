@@ -13,7 +13,7 @@ use std::os::unix::io::IntoRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::SystemTime;
 use tracing::debug;
 
@@ -285,11 +285,18 @@ impl MQState {
 
 /// Thread-safe wrapper around MQState that handles locking
 #[derive(Clone)]
-struct SharedMQState(Arc<Mutex<MQState>>);
+struct SharedMQState {
+    state: Arc<Mutex<MQState>>,
+    /// Notified when any run completes
+    run_completed: Arc<Condvar>,
+}
 
 impl SharedMQState {
     fn new(state: MQState) -> Self {
-        Self(Arc::new(Mutex::new(state)))
+        Self {
+            state: Arc::new(Mutex::new(state)),
+            run_completed: Arc::new(Condvar::new()),
+        }
     }
 
     fn queue_run(
@@ -297,7 +304,7 @@ impl SharedMQState {
         candidate: selfci::revision::ResolvedRevision,
         no_merge: bool,
     ) -> mq_protocol::MQRunInfo {
-        self.0.lock().unwrap().queue_run(candidate, no_merge)
+        self.state.lock().unwrap().queue_run(candidate, no_merge)
     }
 
     fn start_run(
@@ -309,27 +316,28 @@ impl SharedMQState {
         selfci::config::MergeMode,
         super::check::SharedJobStates,
     )> {
-        self.0.lock().unwrap().start_run(run_id)
+        self.state.lock().unwrap().start_run(run_id)
     }
 
     fn complete_run(&self, run_id: mq_protocol::RunId, run_info: mq_protocol::MQRunInfo) {
-        self.0.lock().unwrap().complete_run(run_id, run_info)
+        self.state.lock().unwrap().complete_run(run_id, run_info);
+        self.run_completed.notify_all();
     }
 
     fn get_run(&self, run_id: mq_protocol::RunId) -> Option<mq_protocol::MQRunInfo> {
-        self.0.lock().unwrap().get_run(run_id)
+        self.state.lock().unwrap().get_run(run_id)
     }
 
     fn list_runs(&self, limit: Option<usize>) -> Vec<mq_protocol::MQRunInfo> {
-        self.0.lock().unwrap().list_runs(limit)
+        self.state.lock().unwrap().list_runs(limit)
     }
 
     fn root_dir(&self) -> PathBuf {
-        self.0.lock().unwrap().root_dir().to_path_buf()
+        self.state.lock().unwrap().root_dir().to_path_buf()
     }
 
     fn base_branch(&self) -> String {
-        self.0.lock().unwrap().base_branch().to_string()
+        self.state.lock().unwrap().base_branch().to_string()
     }
 }
 /// Try to resolve base branch from config only (no CLI arg), quietly without printing errors
@@ -886,6 +894,23 @@ fn handle_request(
         mq_protocol::MQRequest::GetStatus { run_id } => {
             let run = state.get_run(run_id);
             mq_protocol::MQResponse::RunStatus { run }
+        }
+
+        mq_protocol::MQRequest::WaitForRun { run_id } => {
+            let mut guard = state.state.lock().unwrap();
+            loop {
+                match guard.get_run(run_id) {
+                    Some(run) if run.completed_at.is_some() => {
+                        return mq_protocol::MQResponse::RunStatus { run: Some(run) };
+                    }
+                    Some(_) => {
+                        guard = state.run_completed.wait(guard).unwrap();
+                    }
+                    None => {
+                        return mq_protocol::MQResponse::RunStatus { run: None };
+                    }
+                }
+            }
         }
     }
 }
@@ -2555,6 +2580,63 @@ pub fn get_status(run_id: u64) -> Result<(), MainError> {
             eprintln!("Unexpected response from daemon");
             Err(MainError::CheckFailed)
         }
+    }
+}
+
+pub fn wait_for_run(run_id: Option<u64>) -> Result<(), MainError> {
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
+
+    let daemon_dir =
+        get_project_daemon_runtime_dir(&root_dir)?.ok_or(MainError::DaemonNotRunning)?;
+
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
+
+    // Resolve run_id: use provided value or find the latest
+    let run_id = match run_id {
+        Some(id) => mq_protocol::RunId(id),
+        None => {
+            let response = mq_protocol::send_mq_request(
+                &socket_path,
+                mq_protocol::MQRequest::List { limit: Some(1) },
+            )
+            .map_err(|_| MainError::CommunicationFailed)?;
+            match response {
+                mq_protocol::MQResponse::RunList { runs } => {
+                    if let Some(run) = runs.first() {
+                        run.id
+                    } else {
+                        eprintln!("No runs in queue");
+                        std::process::exit(selfci::exit_codes::EXIT_MQ_RUN_NOT_FOUND);
+                    }
+                }
+                _ => {
+                    return Err(MainError::CommunicationFailed);
+                }
+            }
+        }
+    };
+
+    eprintln!("Waiting for run {} ...", run_id);
+
+    // Send blocking wait request — daemon responds when run completes
+    let response =
+        mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::WaitForRun { run_id })
+            .map_err(|_| MainError::CommunicationFailed)?;
+
+    match response {
+        mq_protocol::MQResponse::RunStatus { run: Some(run) } => {
+            eprintln!("Run {} completed: {}", run_id, run.status.display());
+            if run.status.is_passed() {
+                Ok(())
+            } else {
+                std::process::exit(selfci::exit_codes::EXIT_MQ_WAIT_FAILED);
+            }
+        }
+        mq_protocol::MQResponse::RunStatus { run: None } => {
+            eprintln!("Run {} not found", run_id);
+            std::process::exit(selfci::exit_codes::EXIT_MQ_RUN_NOT_FOUND);
+        }
+        _ => Err(MainError::CommunicationFailed),
     }
 }
 

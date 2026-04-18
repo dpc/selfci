@@ -9,6 +9,14 @@ use std::time::Duration;
 use tracing::info;
 use tracing_test::traced_test;
 
+/// Helper to run git commands that bypasses the jj git wrapper
+/// by setting SELFCI_VERSION env var
+macro_rules! git {
+    ($($arg:expr),+ $(,)?) => {
+        cmd!("git", $($arg),+).env("SELFCI_VERSION", "test")
+    };
+}
+
 /// Helper to get the selfci binary path
 fn selfci_bin() -> String {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -94,7 +102,8 @@ fn extract_run_id(output: &str) -> u64 {
         .lines()
         .find(|l| l.contains("run ID"))
         .and_then(|l| l.split(':').next_back())
-        .and_then(|s| s.trim().parse().ok())
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
         .expect("Failed to extract run ID")
 }
 
@@ -104,12 +113,12 @@ fn setup_git_base_repo(merge_mode: &str) -> tempfile::TempDir {
     let repo_path = repo_dir.path();
 
     // Initialize git repo
-    cmd!("git", "init").dir(repo_path).run().unwrap();
-    cmd!("git", "config", "user.name", "Test User")
+    git!("init").dir(repo_path).run().unwrap();
+    git!("config", "user.name", "Test User")
         .dir(repo_path)
         .run()
         .unwrap();
-    cmd!("git", "config", "user.email", "test@example.com")
+    git!("config", "user.email", "test@example.com")
         .dir(repo_path)
         .run()
         .unwrap();
@@ -131,12 +140,12 @@ mq:
 
     // Create initial commit on main
     fs::write(repo_path.join("main.txt"), "main content").unwrap();
-    cmd!("git", "add", ".").dir(repo_path).run().unwrap();
-    cmd!("git", "commit", "-m", "Initial commit")
+    git!("add", ".").dir(repo_path).run().unwrap();
+    git!("commit", "-m", "Initial commit")
         .dir(repo_path)
         .run()
         .unwrap();
-    cmd!("git", "branch", "-M", "main")
+    git!("branch", "-M", "main")
         .dir(repo_path)
         .run()
         .unwrap();
@@ -153,7 +162,7 @@ fn create_git_candidate(repo_path: &Path, candidate_num: usize) -> String {
     let branch_name = format!("feature-{}", candidate_num);
 
     // Create feature branch from main
-    cmd!("git", "checkout", "-b", &branch_name, "main")
+    git!("checkout", "-b", &branch_name, "main")
         .dir(repo_path)
         .run()
         .unwrap();
@@ -166,9 +175,8 @@ fn create_git_candidate(repo_path: &Path, candidate_num: usize) -> String {
             format!("feature {} commit {}", candidate_num, commit_num),
         )
         .unwrap();
-        cmd!("git", "add", &filename).dir(repo_path).run().unwrap();
-        cmd!(
-            "git",
+        git!("add", &filename).dir(repo_path).run().unwrap();
+        git!(
             "commit",
             "-m",
             format!("Feature {} commit {}", candidate_num, commit_num)
@@ -179,7 +187,7 @@ fn create_git_candidate(repo_path: &Path, candidate_num: usize) -> String {
     }
 
     // Get the commit ID
-    let commit = cmd!("git", "rev-parse", "HEAD")
+    let commit = git!("rev-parse", "HEAD")
         .dir(repo_path)
         .read()
         .unwrap()
@@ -187,7 +195,7 @@ fn create_git_candidate(repo_path: &Path, candidate_num: usize) -> String {
         .to_string();
 
     // Switch back to main
-    cmd!("git", "checkout", "main")
+    git!("checkout", "main")
         .dir(repo_path)
         .run()
         .unwrap();
@@ -341,7 +349,7 @@ fn create_jj_candidate(repo_path: &Path, test_home: &Path, candidate_num: usize)
 /// Verify that working directory state hasn't changed (git)
 fn verify_working_dir_unchanged_git(repo_path: &Path) {
     // Should still be on main branch
-    let branch = cmd!("git", "branch", "--show-current")
+    let branch = git!("branch", "--show-current")
         .dir(repo_path)
         .read()
         .unwrap();
@@ -368,7 +376,7 @@ fn verify_working_dir_unchanged_jj(repo_path: &Path) {
 /// Verify that all candidates were merged into main (git)
 fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_mode: &str) {
     // Force update working directory to match main branch state
-    cmd!("git", "reset", "--hard", "main")
+    git!("reset", "--hard", "main")
         .dir(repo_path)
         .run()
         .unwrap();
@@ -386,7 +394,7 @@ fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_mode: &s
     }
 
     // Verify commit history contains all feature commits
-    let log = cmd!("git", "log", "--oneline", "main")
+    let log = git!("log", "--oneline", "main")
         .dir(repo_path)
         .read()
         .unwrap();
@@ -409,8 +417,7 @@ fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_mode: &s
         "\n=== git {} merge result ({} candidates) ===",
         merge_mode, num_candidates
     );
-    cmd!(
-        "git",
+    git!(
         "--no-pager",
         "log",
         "--oneline",
@@ -986,13 +993,13 @@ fn test_mq_auto_start() {
     let repo_path = repo.path();
 
     // Create a feature branch
-    cmd!("git", "checkout", "-b", "feature")
+    git!("checkout", "-b", "feature")
         .dir(repo_path)
         .run()
         .unwrap();
     fs::write(repo_path.join("feature.txt"), "feature").unwrap();
-    cmd!("git", "add", ".").dir(repo_path).run().unwrap();
-    cmd!("git", "commit", "-m", "Feature")
+    git!("add", ".").dir(repo_path).run().unwrap();
+    git!("commit", "-m", "Feature")
         .dir(repo_path)
         .run()
         .unwrap();
@@ -1106,13 +1113,13 @@ fn test_mq_explicit_runtime_dir() {
     );
 
     // Create a feature branch and add it to the queue
-    cmd!("git", "checkout", "-b", "feature")
+    git!("checkout", "-b", "feature")
         .dir(repo_path)
         .run()
         .unwrap();
     fs::write(repo_path.join("feature.txt"), "feature content").unwrap();
-    cmd!("git", "add", ".").dir(repo_path).run().unwrap();
-    cmd!("git", "commit", "-m", "Add feature")
+    git!("add", ".").dir(repo_path).run().unwrap();
+    git!("commit", "-m", "Add feature")
         .dir(repo_path)
         .run()
         .unwrap();
@@ -1177,4 +1184,265 @@ fn test_mq_explicit_runtime_dir() {
         .run()
         .unwrap();
     assert!(!result.status.success(), "pid should fail after stop");
+}
+
+// ============================================================================
+// MQ wait tests
+// ============================================================================
+
+/// Test `mq wait` with an explicit run ID for a passing job
+#[test]
+#[traced_test]
+fn test_mq_wait_success() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Create a feature branch
+    let commit = create_git_candidate(repo_path, 1);
+
+    // Start daemon
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    // Add candidate
+    let output = cmd!(selfci_bin(), "mq", "add", "--no-merge", &commit)
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    let run_id = extract_run_id(&output);
+
+    // Wait for it
+    let result = cmd!(selfci_bin(), "mq", "wait", run_id.to_string())
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "mq wait should exit 0 for passing run"
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+}
+
+/// Test `mq wait` for a failing job exits non-zero
+#[test]
+#[traced_test]
+fn test_mq_wait_failure() {
+    let repo_dir = tempfile::TempDir::new().unwrap();
+    let repo_path = repo_dir.path();
+
+    // Set up repo with a failing CI command
+    git!("init").dir(repo_path).run().unwrap();
+    git!("config", "user.name", "Test User")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    git!("config", "user.email", "test@example.com")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
+    fs::write(
+        repo_path.join(".config/selfci/ci.yaml"),
+        r#"job:
+  command: 'false'
+mq:
+  base-branch: main
+  merge-mode: rebase
+"#,
+    )
+    .unwrap();
+
+    fs::write(repo_path.join("main.txt"), "main content").unwrap();
+    git!("add", ".").dir(repo_path).run().unwrap();
+    git!("commit", "-m", "Initial commit")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    git!("branch", "-M", "main").dir(repo_path).run().unwrap();
+
+    // Create feature branch
+    git!("checkout", "-b", "feature", "main")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("feature.txt"), "feature").unwrap();
+    git!("add", ".").dir(repo_path).run().unwrap();
+    git!("commit", "-m", "Feature")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    git!("checkout", "main").dir(repo_path).run().unwrap();
+
+    // Start daemon
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    // Add candidate
+    let output = cmd!(selfci_bin(), "mq", "add", "feature")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    let run_id = extract_run_id(&output);
+
+    // Wait for it — should fail
+    let result = cmd!(selfci_bin(), "mq", "wait", run_id.to_string())
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        !result.status.success(),
+        "mq wait should exit non-zero for failing run"
+    );
+    assert_eq!(
+        result.status.code(),
+        Some(selfci::exit_codes::EXIT_MQ_WAIT_FAILED),
+        "should use EXIT_MQ_WAIT_FAILED exit code"
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+}
+
+/// Test `mq wait` defaults to the latest run when no run ID is given
+#[test]
+#[traced_test]
+fn test_mq_wait_default_latest() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Create two feature branches
+    let _commit1 = create_git_candidate(repo_path, 1);
+    let commit2 = create_git_candidate(repo_path, 2);
+
+    // Start daemon
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    // Add second candidate only (so latest run_id = 1)
+    let output = cmd!(selfci_bin(), "mq", "add", "--no-merge", &commit2)
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    let run_id = extract_run_id(&output);
+
+    // Wait without specifying run ID — should wait for the latest (run_id)
+    let result = cmd!(selfci_bin(), "mq", "wait")
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "mq wait (default latest) should exit 0 for passing run"
+    );
+
+    // Verify that the run we waited for is indeed completed
+    let status = cmd!(selfci_bin(), "mq", "status", run_id.to_string())
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    assert!(
+        status.contains("Status: Success"),
+        "latest run should have completed successfully"
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+}
+
+/// Test `mq wait` with non-existent run ID
+#[test]
+#[traced_test]
+fn test_mq_wait_not_found() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Start daemon
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    // Wait for non-existent run
+    let result = cmd!(selfci_bin(), "mq", "wait", "999")
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        !result.status.success(),
+        "mq wait should fail for non-existent run"
+    );
+    assert_eq!(
+        result.status.code(),
+        Some(selfci::exit_codes::EXIT_MQ_RUN_NOT_FOUND),
+        "should use EXIT_MQ_RUN_NOT_FOUND exit code"
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+}
+
+/// Test `mq wait` with no runs in queue and no run ID
+#[test]
+#[traced_test]
+fn test_mq_wait_empty_queue() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Start daemon
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    // Wait with no runs — should fail with not found
+    let result = cmd!(selfci_bin(), "mq", "wait")
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        !result.status.success(),
+        "mq wait should fail when queue is empty"
+    );
+    assert_eq!(
+        result.status.code(),
+        Some(selfci::exit_codes::EXIT_MQ_RUN_NOT_FOUND),
+        "should use EXIT_MQ_RUN_NOT_FOUND exit code"
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
 }
