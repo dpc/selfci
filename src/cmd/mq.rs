@@ -2684,40 +2684,51 @@ pub fn stop_daemon() -> Result<(), MainError> {
         return Err(MainError::CheckFailed);
     }
 
-    // Wait for process to exit (with timeout)
-    // We check if the daemon directory was cleaned up by the daemon's scopeguard,
-    // which is more reliable than signal::kill(pid, None) which returns success
-    // for zombie processes.
-    let timeout = std::time::Duration::from_secs(30);
-    let start = std::time::Instant::now();
-
-    loop {
-        // Check if daemon directory was cleaned up (daemon exited and ran scopeguard)
-        if !daemon_dir.exists() {
+    // Wait for process to exit reactively using pidfd
+    match wait_for_process_exit(pid as i32, std::time::Duration::from_secs(30)) {
+        Ok(true) => {
             println!("Daemon stopped successfully");
-            return Ok(());
         }
-
-        // Also check if process still exists (not a zombie)
-        // If process doesn't exist at all, clean up the directory
-        if signal::kill(Pid::from_raw(pid as i32), None).is_err() {
-            println!("Daemon stopped successfully");
-            std::fs::remove_dir_all(&daemon_dir).ok();
-            return Ok(());
-        }
-
-        if start.elapsed() > timeout {
+        Ok(false) => {
             eprintln!("Timeout waiting for daemon to stop, sending SIGKILL...");
-            // Send SIGKILL as last resort
             let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-            std::thread::sleep(std::time::Duration::from_millis(500));
-
-            std::fs::remove_dir_all(&daemon_dir).ok();
+            let _ = wait_for_process_exit(pid as i32, std::time::Duration::from_secs(5));
             println!("Daemon forcefully terminated");
-            return Ok(());
         }
+        Err(e) => {
+            debug!("pidfd wait failed ({e}), assuming daemon exited");
+        }
+    }
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    if daemon_dir.exists() {
+        std::fs::remove_dir_all(&daemon_dir).ok();
+    }
+
+    Ok(())
+}
+
+/// Wait for a process to exit using pidfd_open + poll (reactive, no polling).
+/// Returns Ok(true) if the process exited within the timeout, Ok(false) on timeout.
+fn wait_for_process_exit(pid: i32, timeout: std::time::Duration) -> std::io::Result<bool> {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0 as libc::c_uint) };
+    if pidfd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let pidfd = pidfd as libc::c_int;
+
+    let timeout_ms = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+    let mut pfd = libc::pollfd {
+        fd: pidfd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    unsafe { libc::close(pidfd) };
+
+    if ret < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(ret > 0)
     }
 }
 

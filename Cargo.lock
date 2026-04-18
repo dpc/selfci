@@ -875,6 +875,7 @@ dependencies = [
  "duct",
  "error_set",
  "humantime",
+ "libc",
  "nix",
  "rand",
  "scopeguard",

@@ -8,7 +8,7 @@ use std::fmt::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -136,11 +136,18 @@ pub struct JobStates {
 /// Shared state for tracking jobs during check execution.
 /// Can be passed in to allow external monitoring of job progress.
 #[derive(Clone)]
-pub struct SharedJobStates(Arc<Mutex<JobStates>>);
+pub struct SharedJobStates {
+    inner: Arc<Mutex<JobStates>>,
+    /// Notified when a job completion is recorded
+    completed: Arc<Condvar>,
+}
 
 impl SharedJobStates {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(JobStates::default())))
+        Self {
+            inner: Arc::new(Mutex::new(JobStates::default())),
+            completed: Arc::new(Condvar::new()),
+        }
     }
 
     /// Access the inner state with a closure
@@ -148,7 +155,7 @@ impl SharedJobStates {
     where
         F: FnOnce(&JobStates) -> R,
     {
-        let guard = self.0.lock().unwrap();
+        let guard = self.inner.lock().unwrap();
         f(&guard)
     }
 
@@ -157,8 +164,26 @@ impl SharedJobStates {
     where
         F: FnOnce(&mut JobStates) -> R,
     {
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap();
         f(&mut guard)
+    }
+
+    /// Wait until the named job has a completion entry, then return its status
+    pub fn wait_for_completion(&self, name: &str) -> protocol::JobStatus {
+        let mut guard = self.inner.lock().unwrap();
+        loop {
+            if let Some(status) = guard.completions.get(name).cloned() {
+                return status;
+            }
+            guard = self.completed.wait(guard).unwrap();
+        }
+    }
+
+    /// Record a job completion and notify all waiters
+    pub fn complete_job(&self, name: String, status: protocol::JobStatus) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.completions.insert(name, status);
+        self.completed.notify_all();
     }
 }
 
@@ -528,10 +553,7 @@ pub fn run_candidate_check(
                 } else {
                     protocol::JobStatus::Succeeded
                 };
-                shared_job_states.with_mut(|s| {
-                    s.completions
-                        .insert(outcome.job_name.clone(), job_status.clone());
-                });
+                shared_job_states.complete_job(outcome.job_name.clone(), job_status.clone());
 
                 // Track completed job
                 all_jobs.push(protocol::CompletedJob {

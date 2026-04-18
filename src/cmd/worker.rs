@@ -248,22 +248,11 @@ pub fn control_socket_listener(
                                     return;
                                 }
 
-                                // Poll for completion (no timeout)
-                                let poll_interval = std::time::Duration::from_millis(100);
-
-                                loop {
-                                    let status = shared_job_states_clone
-                                        .with(|s| s.completions.get(&name).cloned());
-                                    if let Some(status) = status {
-                                        let _ = protocol::write_response(
-                                            &mut stream,
-                                            protocol::JobControlResponse::JobCompleted { status },
-                                        );
-                                        return;
-                                    }
-
-                                    std::thread::sleep(poll_interval);
-                                }
+                                let status = shared_job_states_clone.wait_for_completion(&name);
+                                let _ = protocol::write_response(
+                                    &mut stream,
+                                    protocol::JobControlResponse::JobCompleted { status },
+                                );
                             }
                             protocol::JobControlRequest::StartJob { name } => {
                                 let mut used = used_job_names_clone.lock().unwrap();
@@ -451,8 +440,8 @@ pub fn control_socket_listener(
                     debug!("Control socket listener shutting down");
                     break;
                 }
-                debug!("Control socket accept error: {}", e);
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                debug!("Control socket accept error: {e}");
+                continue;
             }
         }
     }

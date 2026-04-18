@@ -145,10 +145,7 @@ mq:
         .dir(repo_path)
         .run()
         .unwrap();
-    git!("branch", "-M", "main")
-        .dir(repo_path)
-        .run()
-        .unwrap();
+    git!("branch", "-M", "main").dir(repo_path).run().unwrap();
 
     // Create working file (simulating user's uncommitted work)
     fs::write(repo_path.join("working.txt"), "working on something else").unwrap();
@@ -195,10 +192,7 @@ fn create_git_candidate(repo_path: &Path, candidate_num: usize) -> String {
         .to_string();
 
     // Switch back to main
-    git!("checkout", "main")
-        .dir(repo_path)
-        .run()
-        .unwrap();
+    git!("checkout", "main").dir(repo_path).run().unwrap();
 
     commit
 }
@@ -417,17 +411,10 @@ fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_mode: &s
         "\n=== git {} merge result ({} candidates) ===",
         merge_mode, num_candidates
     );
-    git!(
-        "--no-pager",
-        "log",
-        "--oneline",
-        "--graph",
-        "main",
-        "-20"
-    )
-    .dir(repo_path)
-    .run()
-    .unwrap();
+    git!("--no-pager", "log", "--oneline", "--graph", "main", "-20")
+        .dir(repo_path)
+        .run()
+        .unwrap();
 }
 
 /// Verify that all candidates were merged into main (jj)
