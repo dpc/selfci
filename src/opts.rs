@@ -120,6 +120,10 @@ pub enum MQCommands {
         /// Don't merge even if check passes (dry-run)
         #[arg(long)]
         no_merge: bool,
+
+        /// Wait for this run to complete
+        #[arg(long)]
+        wait: bool,
     },
     /// Check a candidate without merging (alias for `add --no-merge`)
     Check {

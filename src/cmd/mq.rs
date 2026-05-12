@@ -2324,7 +2324,11 @@ fn merge_candidate(
     }
 }
 
-pub fn add_candidate(candidate: Option<String>, no_merge: bool) -> Result<(), MainError> {
+pub fn add_candidate(
+    candidate: Option<String>,
+    no_merge: bool,
+    wait: bool,
+) -> Result<(), MainError> {
     let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
 
     let candidate = match candidate {
@@ -2374,6 +2378,9 @@ pub fn add_candidate(candidate: Option<String>, no_merge: bool) -> Result<(), Ma
                 );
             } else {
                 println!("Added to merge queue with run ID: {}", run_id);
+            }
+            if wait {
+                wait_for_run_id(run_id)?;
             }
             Ok(())
         }
@@ -2615,6 +2622,17 @@ pub fn wait_for_run(run_id: Option<u64>) -> Result<(), MainError> {
             }
         }
     };
+
+    wait_for_run_id(run_id)
+}
+
+fn wait_for_run_id(run_id: mq_protocol::RunId) -> Result<(), MainError> {
+    let root_dir = std::env::current_dir().map_err(WorkDirError::CreateFailed)?;
+
+    let daemon_dir =
+        get_project_daemon_runtime_dir(&root_dir)?.ok_or(MainError::DaemonNotRunning)?;
+
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
 
     eprintln!("Waiting for run {} ...", run_id);
 

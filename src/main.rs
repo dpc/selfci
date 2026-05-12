@@ -270,11 +270,12 @@ fn main_inner() -> Result<(), MainError> {
             Some(opts::MQCommands::Add {
                 candidate,
                 no_merge,
+                wait,
             }) => {
-                cmd::mq::add_candidate(candidate, no_merge)?;
+                cmd::mq::add_candidate(candidate, no_merge, wait)?;
             }
             Some(opts::MQCommands::Check { candidate }) => {
-                cmd::mq::add_candidate(candidate, true)?;
+                cmd::mq::add_candidate(candidate, true, false)?;
             }
             Some(opts::MQCommands::List { limit }) => {
                 cmd::mq::list_runs(limit)?;

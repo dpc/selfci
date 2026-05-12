@@ -1219,6 +1219,49 @@ fn test_mq_wait_success() {
         .unwrap();
 }
 
+/// Test `mq add --wait` waits for the newly added run
+#[test]
+#[traced_test]
+fn test_mq_add_wait_success() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+
+    // Create a feature branch
+    let commit = create_git_candidate(repo_path, 1);
+
+    // Start daemon
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    let result = cmd!(selfci_bin(), "mq", "add", "--wait", "--no-merge", &commit)
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "mq add --wait should exit 0 for passing run"
+    );
+
+    let status = cmd!(selfci_bin(), "mq", "status", "1")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    assert!(
+        status.contains("Status: Success"),
+        "newly added run should be completed, status: {status}"
+    );
+
+    // Stop daemon
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+}
+
 /// Test `mq wait` for a failing job exits non-zero
 #[test]
 #[traced_test]
