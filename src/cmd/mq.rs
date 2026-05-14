@@ -1647,6 +1647,22 @@ pub(crate) fn abandon_jj_test_merge(root_dir: &Path, test_change_id: &str, base_
         .run();
 }
 
+fn jj_revision_contains(
+    root_dir: &Path,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool, selfci::MergeError> {
+    let revset = format!("{} & ::{}", ancestor, descendant);
+    let output = Cmd::new("jj")
+        .args(["log", "-r", &revset, "-T", "commit_id", "--no-graph"])
+        .dir(root_dir)
+        .to_expression()
+        .read()
+        .map_err(selfci::MergeError::ChangeIdFailed)?;
+
+    Ok(!output.trim().is_empty())
+}
+
 /// Test rebase for Jujutsu - duplicates and rebases candidate onto base
 /// Uses jj duplicate to create a copy, leaving the original candidate untouched
 /// Returns the resulting commit and change IDs of the duplicated, rebased commits
@@ -1656,6 +1672,18 @@ fn test_merge_jj_rebase(
     candidate: &selfci::revision::ResolvedRevision,
 ) -> Result<TestMergeOutcome, selfci::MergeError> {
     let mut output_log = String::new();
+
+    if jj_revision_contains(root_dir, base_branch, candidate.commit_id.as_str())? {
+        output_log.push_str(&format!(
+            "Jujutsu test rebase: {} already contains {}; using candidate directly\n\n",
+            candidate.commit_id, base_branch
+        ));
+        return Ok(TestMergeOutcome {
+            commit_id: candidate.commit_id.clone(),
+            change_id: candidate.change_id.clone(),
+            output: output_log,
+        });
+    }
 
     // Duplicate the candidate branch (commits from base to candidate, exclusive of base)
     // This creates copies with new change IDs, leaving the original untouched
@@ -2102,34 +2130,47 @@ fn merge_candidate_jj_rebase(
         .to_string();
     merge_log.push_str(&format!("{}\n\n", change_id));
 
-    // Rebase the candidate branch onto base
-    // The test merge used a duplicate, so the original candidate is still untouched
-    let rebase_cmd = Cmd::new("jj")
-        .args([
-            "--ignore-working-copy",
-            "rebase",
-            "-b",
-            candidate.commit_id.as_str(),
-            "-d",
-            base_branch,
-        ])
-        .dir(root_dir);
-    let _ = write!(merge_log, "{}", rebase_cmd.log_line());
-    let rebase_result = rebase_cmd
-        .to_expression()
-        .stderr_to_stdout()
-        .stdout_capture()
-        .unchecked()
-        .run()
-        .map_err(|e| selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string())))?;
-    let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
-    if !rebase_result.status.success() {
-        return Err(selfci::MergeError::RebaseFailed(
-            selfci::CommandOutputError(output),
-        ));
-    }
-    merge_log.push_str(&output);
-    merge_log.push_str("\n\n");
+    // Rebase the candidate branch onto base if it is not already based on it.
+    // The test merge used a duplicate, so the original candidate is still untouched.
+    let bookmark_target =
+        if jj_revision_contains(root_dir, base_branch, candidate.commit_id.as_str())? {
+            merge_log.push_str(&format!(
+                "Candidate {} already contains {}; skipping rebase\n\n",
+                candidate.commit_id, base_branch
+            ));
+            candidate.commit_id.as_str()
+        } else {
+            let source_revset = format!("roots({}..{})", base_branch, candidate.commit_id);
+            let rebase_cmd = Cmd::new("jj")
+                .args([
+                    "--ignore-working-copy",
+                    "rebase",
+                    "-s",
+                    &source_revset,
+                    "-d",
+                    base_branch,
+                ])
+                .dir(root_dir);
+            let _ = write!(merge_log, "{}", rebase_cmd.log_line());
+            let rebase_result = rebase_cmd
+                .to_expression()
+                .stderr_to_stdout()
+                .stdout_capture()
+                .unchecked()
+                .run()
+                .map_err(|e| {
+                    selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string()))
+                })?;
+            let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
+            if !rebase_result.status.success() {
+                return Err(selfci::MergeError::RebaseFailed(
+                    selfci::CommandOutputError(output),
+                ));
+            }
+            merge_log.push_str(&output);
+            merge_log.push_str("\n\n");
+            &change_id
+        };
 
     // Move the base branch bookmark to the rebased commit using change ID
     let bookmark_cmd = Cmd::new("jj")
@@ -2139,15 +2180,23 @@ fn merge_candidate_jj_rebase(
             "set",
             base_branch,
             "-r",
-            &change_id,
+            bookmark_target,
         ])
         .dir(root_dir);
     let _ = write!(merge_log, "{}", bookmark_cmd.log_line());
-    let output = bookmark_cmd
+    let bookmark_result = bookmark_cmd
         .to_expression()
         .stderr_to_stdout()
-        .read()
+        .stdout_capture()
+        .unchecked()
+        .run()
         .map_err(selfci::MergeError::BranchUpdateFailed)?;
+    let output = String::from_utf8_lossy(&bookmark_result.stdout).to_string();
+    if !bookmark_result.status.success() {
+        return Err(selfci::MergeError::RebaseFailed(
+            selfci::CommandOutputError(output),
+        ));
+    }
     merge_log.push_str(&output);
     merge_log.push_str("\n\n");
 

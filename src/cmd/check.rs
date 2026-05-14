@@ -252,7 +252,10 @@ pub fn run_candidate_check(
 
     // For jj: abandon test merge commits after they're exported to git
     // This ensures commits are cloned but don't clutter user's jj log during tests
-    if matches!(vcs, selfci::VCS::Jujutsu) && original_candidate.is_some() {
+    if matches!(vcs, selfci::VCS::Jujutsu)
+        && original_candidate
+            .is_some_and(|candidate| candidate.change_id != candidate_rev.change_id)
+    {
         super::mq::abandon_jj_test_merge(
             root_dir,
             candidate_rev.change_id.as_str(),

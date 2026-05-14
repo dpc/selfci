@@ -604,6 +604,157 @@ fn run_jj_merge_test(merge_mode: &str, num_candidates: usize) {
     verify_all_merged_jj(repo_path, num_candidates, merge_mode);
 }
 
+fn run_jj_rebase_prefix_immutable_test(with_intermediate_immutable_commit: bool) {
+    let (repo, test_home) = setup_jj_base_repo("rebase");
+    let repo_path = repo.path();
+
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+
+    let candidate = if with_intermediate_immutable_commit {
+        fs::write(repo_path.join("prefix.txt"), "immutable prefix").unwrap();
+        cmd!("jj", "file", "track", "prefix.txt")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!("jj", "describe", "-m", "Immutable prefix")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!("jj", "bookmark", "create", "immutable-prefix")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!(
+            "jj",
+            "config",
+            "set",
+            "--repo",
+            "revset-aliases.\"immutable_heads()\"",
+            "immutable-prefix"
+        )
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+
+        cmd!("jj", "new")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        fs::write(repo_path.join("candidate.txt"), "candidate").unwrap();
+        cmd!("jj", "file", "track", "candidate.txt")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!("jj", "describe", "-m", "Candidate")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .read()
+            .unwrap()
+            .trim()
+            .to_string()
+    } else {
+        fs::write(repo_path.join("candidate.txt"), "immutable candidate").unwrap();
+        cmd!("jj", "file", "track", "candidate.txt")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!("jj", "describe", "-m", "Immutable candidate")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!("jj", "bookmark", "create", "immutable-candidate")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!(
+            "jj",
+            "config",
+            "set",
+            "--repo",
+            "revset-aliases.\"immutable_heads()\"",
+            "immutable-candidate"
+        )
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+        cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .read()
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+
+    fs::write(repo_path.join("working.txt"), "working on something else").unwrap();
+
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .env("SELFCI_LOG", "debug")
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    let output = cmd!(selfci_bin(), "mq", "add", &candidate)
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .read()
+        .unwrap();
+    let run_id = extract_run_id(&output);
+
+    let success = wait_for_run_completion(repo_path, run_id, 30);
+    if !success {
+        let status = cmd!(selfci_bin(), "mq", "status", run_id.to_string())
+            .dir(repo_path)
+            .read()
+            .unwrap_or_else(|e| format!("Failed to read status: {}", e));
+        eprintln!("{}", status);
+    }
+    assert!(success, "Job {} did not complete successfully", run_id);
+
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .run()
+        .unwrap();
+
+    let main_commit = cmd!("jj", "log", "-r", "main", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(main_commit, candidate);
+    verify_working_dir_unchanged_jj(repo_path);
+}
+
 // ============================================================================
 // Git rebase tests
 // ============================================================================
@@ -650,6 +801,18 @@ fn test_jj_rebase_merge_single() {
 #[traced_test]
 fn test_jj_rebase_merge_multi() {
     run_jj_merge_test("rebase", 5);
+}
+
+#[test]
+#[traced_test]
+fn test_jj_rebase_merge_simple_prefix_immutable_candidate() {
+    run_jj_rebase_prefix_immutable_test(false);
+}
+
+#[test]
+#[traced_test]
+fn test_jj_rebase_merge_prefix_with_immutable_intermediate() {
+    run_jj_rebase_prefix_immutable_test(true);
 }
 
 // ============================================================================
