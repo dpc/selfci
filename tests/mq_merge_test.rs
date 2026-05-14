@@ -200,6 +200,13 @@ fn create_git_candidate(repo_path: &Path, candidate_num: usize) -> String {
 /// Setup a base Jujutsu repository with just main bookmark and initial commit
 /// Returns (repo_dir, test_home_path)
 fn setup_jj_base_repo(merge_mode: &str) -> (tempfile::TempDir, PathBuf) {
+    setup_jj_base_repo_with_job(merge_mode, "true")
+}
+
+fn setup_jj_base_repo_with_job(
+    merge_mode: &str,
+    job_command: &str,
+) -> (tempfile::TempDir, PathBuf) {
     let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let repo_path = repo_dir.path();
 
@@ -241,7 +248,7 @@ fn setup_jj_base_repo(merge_mode: &str) -> (tempfile::TempDir, PathBuf) {
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
             r#"job:
-  command: 'true'
+  command: '{job_command}'
 mq:
   base-branch: main
   merge-mode: {merge_mode}
@@ -604,6 +611,50 @@ fn run_jj_merge_test(merge_mode: &str, num_candidates: usize) {
     verify_all_merged_jj(repo_path, num_candidates, merge_mode);
 }
 
+fn run_jj_candidate(repo_path: &Path, test_home: &Path, candidate: &str, no_merge: bool) {
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .env("SELFCI_LOG", "debug")
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+
+    let mut add_args = vec!["mq", "add"];
+    if no_merge {
+        add_args.push("--no-merge");
+    }
+    add_args.push(candidate);
+    let output = cmd(selfci_bin(), add_args)
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .read()
+        .unwrap();
+    let run_id = extract_run_id(&output);
+
+    let success = wait_for_run_completion(repo_path, run_id, 30);
+    if !success {
+        let status = cmd!(selfci_bin(), "mq", "status", run_id.to_string())
+            .dir(repo_path)
+            .read()
+            .unwrap_or_else(|e| format!("Failed to read status: {}", e));
+        eprintln!("{}", status);
+    }
+    assert!(success, "Job {} did not complete successfully", run_id);
+
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .run()
+        .unwrap();
+}
+
 fn run_jj_rebase_prefix_immutable_test(with_intermediate_immutable_commit: bool) {
     let (repo, test_home) = setup_jj_base_repo("rebase");
     let repo_path = repo.path();
@@ -813,6 +864,161 @@ fn test_jj_rebase_merge_simple_prefix_immutable_candidate() {
 #[traced_test]
 fn test_jj_rebase_merge_prefix_with_immutable_intermediate() {
     run_jj_rebase_prefix_immutable_test(true);
+}
+
+#[test]
+#[traced_test]
+fn test_jj_rebase_precheck_checks_full_unique_stack() {
+    let (repo, test_home) =
+        setup_jj_base_repo_with_job("rebase", "test -f needed.txt && test -f candidate.txt");
+    let repo_path = repo.path();
+
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("needed.txt"), "needed by candidate").unwrap();
+    cmd!("jj", "file", "track", "needed.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Add needed file")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "new")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("candidate.txt"), "candidate").unwrap();
+    cmd!("jj", "file", "track", "candidate.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Candidate")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    let candidate = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap()
+        .trim()
+        .to_string();
+
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    run_jj_candidate(repo_path, &test_home, &candidate, true);
+}
+
+#[test]
+#[traced_test]
+fn test_jj_rebase_merge_skips_landed_divergent_ancestor() {
+    let (repo, test_home) = setup_jj_base_repo("rebase");
+    let repo_path = repo.path();
+
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("ancestor.txt"), "old ancestor\n").unwrap();
+    cmd!("jj", "file", "track", "ancestor.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Ancestor")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    let old_ancestor = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap()
+        .trim()
+        .to_string();
+
+    cmd!("jj", "new")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("candidate.txt"), "candidate child\n").unwrap();
+    cmd!("jj", "file", "track", "candidate.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Candidate child")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    let candidate = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap()
+        .trim()
+        .to_string();
+
+    cmd!("jj", "edit", &old_ancestor)
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("ancestor.txt"), "landed ancestor\n").unwrap();
+    cmd!("jj", "describe", "-m", "Ancestor landed")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "bookmark", "set", "main", "-r", "@")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+
+    // Keep the submitted candidate on the old ancestor commit, while main has
+    // the same change ID with different landed content.
+    cmd!("jj", "rebase", "-r", &candidate, "-d", &old_ancestor)
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+
+    run_jj_candidate(repo_path, &test_home, &candidate, false);
+
+    let ancestor = cmd!("jj", "file", "show", "-r", "main", "ancestor.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+    let child = cmd!("jj", "file", "show", "-r", "main", "candidate.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+    assert_eq!(ancestor, "landed ancestor");
+    assert_eq!(child, "candidate child");
 }
 
 // ============================================================================

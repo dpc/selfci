@@ -6,7 +6,7 @@ use nix::unistd::{ForkResult, Pid, close, dup2, fork, setsid};
 use selfci::duct_util::Cmd;
 use selfci::{MainError, WorkDirError, constants, envs, get_vcs, mq_protocol, protocol};
 use signal_hook::consts::SIGTERM;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::os::unix::io::IntoRawFd;
@@ -1615,7 +1615,7 @@ fn test_merge_git_merge(
 /// but BEFORE running tests. This ensures the commits are exported to git (for cloning)
 /// but hidden from jj log during and after the test run.
 ///
-/// For rebase mode: abandons the duplicated commits (entire branch)
+/// For rebase mode: abandons the duplicated candidate commit
 /// For merge mode: abandons the temporary merge commit
 pub(crate) fn abandon_jj_test_merge(root_dir: &Path, test_change_id: &str, base_ref: &str) {
     debug!(change_id = %test_change_id, base = %base_ref, "Abandoning jj test merge commits");
@@ -1647,23 +1647,111 @@ pub(crate) fn abandon_jj_test_merge(root_dir: &Path, test_change_id: &str, base_
         .run();
 }
 
-fn jj_revision_contains(
+struct JjUniqueMutableStack {
+    candidate_change_id: String,
+    has_unique_immutable_ancestor: bool,
+    unique_stack: Vec<String>,
+}
+
+fn jj_unique_mutable_stack(
     root_dir: &Path,
-    ancestor: &str,
-    descendant: &str,
-) -> Result<bool, selfci::MergeError> {
-    let revset = format!("{} & ::{}", ancestor, descendant);
-    let output = Cmd::new("jj")
-        .args(["log", "-r", &revset, "-T", "commit_id", "--no-graph"])
-        .dir(root_dir)
+    base_branch: &str,
+    candidate: &selfci::revision::ResolvedRevision,
+    output_log: &mut String,
+) -> Result<JjUniqueMutableStack, selfci::MergeError> {
+    let change_id_cmd = Cmd::new("jj")
+        .args([
+            "log",
+            "-r",
+            candidate.commit_id.as_str(),
+            "-T",
+            "change_id",
+            "--no-graph",
+            "--color=never",
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", change_id_cmd.log_line());
+    let candidate_change_id = change_id_cmd
+        .to_expression()
+        .read()
+        .map_err(selfci::MergeError::ChangeIdFailed)?
+        .trim()
+        .to_string();
+    output_log.push_str(&format!("{}\n\n", candidate_change_id));
+
+    let base_change_ids_cmd = Cmd::new("jj")
+        .args([
+            "log",
+            "-r",
+            &format!("::{}", base_branch),
+            "-T",
+            "change_id ++ '\n'",
+            "--no-graph",
+            "--color=never",
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", base_change_ids_cmd.log_line());
+    let base_change_ids_output = base_change_ids_cmd
         .to_expression()
         .read()
         .map_err(selfci::MergeError::ChangeIdFailed)?;
+    output_log.push_str(&format!("{}\n", base_change_ids_output));
+    let base_change_ids: HashSet<_> = base_change_ids_output.lines().collect();
 
-    Ok(!output.trim().is_empty())
+    let immutable_stack_cmd = Cmd::new("jj")
+        .args([
+            "log",
+            "-r",
+            &format!("::{} & immutable()", candidate_change_id),
+            "-T",
+            "change_id ++ '\n'",
+            "--no-graph",
+            "--color=never",
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", immutable_stack_cmd.log_line());
+    let immutable_stack_output = immutable_stack_cmd
+        .to_expression()
+        .read()
+        .map_err(selfci::MergeError::ChangeIdFailed)?;
+    output_log.push_str(&format!("{}\n", immutable_stack_output));
+    let has_unique_immutable_ancestor = immutable_stack_output
+        .lines()
+        .any(|candidate_change_id| !base_change_ids.contains(candidate_change_id));
+
+    let candidate_stack_cmd = Cmd::new("jj")
+        .args([
+            "log",
+            "-r",
+            &format!("::{} & mutable()", candidate_change_id),
+            "-T",
+            "change_id ++ '\n'",
+            "--no-graph",
+            "--color=never",
+        ])
+        .dir(root_dir);
+    let _ = write!(output_log, "{}", candidate_stack_cmd.log_line());
+    let candidate_stack_output = candidate_stack_cmd
+        .to_expression()
+        .read()
+        .map_err(selfci::MergeError::ChangeIdFailed)?;
+    output_log.push_str(&format!("{}\n", candidate_stack_output));
+
+    let mut unique_stack: Vec<_> = candidate_stack_output
+        .lines()
+        .filter(|candidate_change_id| !base_change_ids.contains(candidate_change_id))
+        .map(str::to_string)
+        .collect();
+    unique_stack.reverse();
+
+    Ok(JjUniqueMutableStack {
+        candidate_change_id,
+        has_unique_immutable_ancestor,
+        unique_stack,
+    })
 }
 
-/// Test rebase for Jujutsu - duplicates and rebases candidate onto base
+/// Test rebase for Jujutsu - duplicates and rebases the unique mutable suffix onto base
 /// Uses jj duplicate to create a copy, leaving the original candidate untouched
 /// Returns the resulting commit and change IDs of the duplicated, rebased commits
 fn test_merge_jj_rebase(
@@ -1672,24 +1760,27 @@ fn test_merge_jj_rebase(
     candidate: &selfci::revision::ResolvedRevision,
 ) -> Result<TestMergeOutcome, selfci::MergeError> {
     let mut output_log = String::new();
+    let stack = jj_unique_mutable_stack(root_dir, base_branch, candidate, &mut output_log)?;
 
-    if jj_revision_contains(root_dir, base_branch, candidate.commit_id.as_str())? {
-        output_log.push_str(&format!(
-            "Jujutsu test rebase: {} already contains {}; using candidate directly\n\n",
-            candidate.commit_id, base_branch
-        ));
+    if stack.unique_stack.is_empty() && !stack.has_unique_immutable_ancestor {
         return Ok(TestMergeOutcome {
             commit_id: candidate.commit_id.clone(),
-            change_id: candidate.change_id.clone(),
+            change_id: selfci::revision::ChangeId::new(stack.candidate_change_id),
             output: output_log,
         });
     }
 
-    // Duplicate the candidate branch (commits from base to candidate, exclusive of base)
-    // This creates copies with new change IDs, leaving the original untouched
-    let revset = format!("{}..{}", base_branch, candidate.commit_id);
+    let stack_root = stack
+        .unique_stack
+        .first()
+        .unwrap_or(&stack.candidate_change_id);
+    let dup_revset = if stack.unique_stack.is_empty() {
+        stack.candidate_change_id.clone()
+    } else {
+        format!("{}::{}", stack_root, stack.candidate_change_id)
+    };
     let dup_cmd = Cmd::new("jj")
-        .args(["--ignore-working-copy", "duplicate", &revset])
+        .args(["--ignore-working-copy", "duplicate", &dup_revset])
         .dir(root_dir);
     let _ = write!(output_log, "{}", dup_cmd.log_line());
     let dup_output = dup_cmd
@@ -1700,21 +1791,24 @@ fn test_merge_jj_rebase(
     output_log.push_str(&dup_output);
     output_log.push_str("\n\n");
 
-    // Parse the output to find the duplicate of the candidate tip
-    // Output format: "Duplicated <short_commit_id> as <new_change_id> <new_short_commit_id> <description>"
-    // The duplicates are output in topological order (ancestors first), so the last one is the tip
+    let mut duplicated_root_change_id = None;
     let mut duplicated_tip_change_id = None;
     for line in dup_output.lines() {
         if line.starts_with("Duplicated") {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            // Format: "Duplicated <short_commit> as <new_change_id> ..."
             if parts.len() >= 4 {
+                duplicated_root_change_id.get_or_insert_with(|| parts[3].to_string());
                 duplicated_tip_change_id = Some(parts[3].to_string());
-                // Keep going to get the last one (the tip)
             }
         }
     }
 
+    let dup_root_change_id = duplicated_root_change_id.ok_or_else(|| {
+        selfci::MergeError::RebaseFailed(selfci::CommandOutputError(format!(
+            "Failed to find duplicated root in output: {}",
+            dup_output
+        )))
+    })?;
     let dup_change_id = duplicated_tip_change_id.ok_or_else(|| {
         selfci::MergeError::RebaseFailed(selfci::CommandOutputError(format!(
             "Failed to find duplicated tip in output: {}",
@@ -1722,13 +1816,13 @@ fn test_merge_jj_rebase(
         )))
     })?;
 
-    // Rebase the duplicated commits onto base branch
+    // Rebase the same unique mutable suffix that final merge will land.
     let rebase_cmd = Cmd::new("jj")
         .args([
             "--ignore-working-copy",
             "rebase",
-            "-b",
-            &dup_change_id,
+            "-s",
+            &dup_root_change_id,
             "-d",
             base_branch,
         ])
@@ -2108,71 +2202,52 @@ fn merge_candidate_jj_rebase(
     candidate: &selfci::revision::ResolvedRevision,
 ) -> Result<String, selfci::MergeError> {
     let mut merge_log = String::new();
+    let stack = jj_unique_mutable_stack(root_dir, base_branch, candidate, &mut merge_log)?;
 
-    // Get the change ID of the candidate (stable across rebases)
-    let change_id_cmd = Cmd::new("jj")
-        .args([
-            "log",
-            "-r",
-            candidate.commit_id.as_str(),
-            "-T",
-            "change_id",
-            "--no-graph",
-            "--color=never",
-        ])
-        .dir(root_dir);
-    let _ = write!(merge_log, "{}", change_id_cmd.log_line());
-    let change_id = change_id_cmd
-        .to_expression()
-        .read()
-        .map_err(selfci::MergeError::ChangeIdFailed)?
-        .trim()
-        .to_string();
-    merge_log.push_str(&format!("{}\n\n", change_id));
-
-    // Rebase the candidate branch onto base if it is not already based on it.
-    // The test merge used a duplicate, so the original candidate is still untouched.
-    let bookmark_target =
-        if jj_revision_contains(root_dir, base_branch, candidate.commit_id.as_str())? {
-            merge_log.push_str(&format!(
-                "Candidate {} already contains {}; skipping rebase\n\n",
-                candidate.commit_id, base_branch
+    let bookmark_target;
+    if stack.has_unique_immutable_ancestor {
+        // Do not rewrite immutable candidates or candidates whose unique prefix is
+        // immutable. They are already valid jj commits, so landing them means just
+        // moving the base bookmark to the requested commit.
+        bookmark_target = candidate.commit_id.as_str();
+    } else if let Some(stack_root) = stack.unique_stack.first() {
+        // Rebase the unique mutable suffix of the candidate stack. Compare change
+        // IDs, not only commit ancestry, so jj divergent/equivalent ancestors that
+        // are already represented on the base are skipped instead of replayed.
+        let rebase_cmd = Cmd::new("jj")
+            .args([
+                "--ignore-working-copy",
+                "rebase",
+                "-s",
+                stack_root,
+                "-d",
+                base_branch,
+            ])
+            .dir(root_dir);
+        let _ = write!(merge_log, "{}", rebase_cmd.log_line());
+        let rebase_result = rebase_cmd
+            .to_expression()
+            .stderr_to_stdout()
+            .stdout_capture()
+            .unchecked()
+            .run()
+            .map_err(|e| {
+                selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string()))
+            })?;
+        let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
+        if !rebase_result.status.success() {
+            return Err(selfci::MergeError::RebaseFailed(
+                selfci::CommandOutputError(output),
             ));
-            candidate.commit_id.as_str()
-        } else {
-            let source_revset = format!("roots({}..{})", base_branch, candidate.commit_id);
-            let rebase_cmd = Cmd::new("jj")
-                .args([
-                    "--ignore-working-copy",
-                    "rebase",
-                    "-s",
-                    &source_revset,
-                    "-d",
-                    base_branch,
-                ])
-                .dir(root_dir);
-            let _ = write!(merge_log, "{}", rebase_cmd.log_line());
-            let rebase_result = rebase_cmd
-                .to_expression()
-                .stderr_to_stdout()
-                .stdout_capture()
-                .unchecked()
-                .run()
-                .map_err(|e| {
-                    selfci::MergeError::RebaseFailed(selfci::CommandOutputError(e.to_string()))
-                })?;
-            let output = String::from_utf8_lossy(&rebase_result.stdout).to_string();
-            if !rebase_result.status.success() {
-                return Err(selfci::MergeError::RebaseFailed(
-                    selfci::CommandOutputError(output),
-                ));
-            }
-            merge_log.push_str(&output);
-            merge_log.push_str("\n\n");
-            &change_id
-        };
+        }
+        merge_log.push_str(&output);
+        merge_log.push_str("\n\n");
+        bookmark_target = &stack.candidate_change_id;
+    } else {
+        bookmark_target = candidate.commit_id.as_str();
+    }
 
-    // Move the base branch bookmark to the rebased commit using change ID
+    // Move the base branch bookmark to the landed candidate.
     let bookmark_cmd = Cmd::new("jj")
         .args([
             "--ignore-working-copy",
