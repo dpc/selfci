@@ -59,6 +59,7 @@ fn test_copy_revisions_jujutsu() {
     let candidate_content =
         fs::read_to_string(&candidate_file).expect("Failed to read candidate file");
     assert_eq!(candidate_content, "candidate content");
+    assert_no_selfci_export_refs(repo.path());
 }
 
 #[test]
@@ -177,7 +178,11 @@ fn test_jj_bookmark_cleanup_on_clone_failure() {
         "selfci check should fail with broken git clone"
     );
 
-    // Verify no selfci-export-* bookmarks remain
+    assert_no_selfci_export_refs(repo_path);
+}
+
+fn assert_no_selfci_export_refs(repo_path: &std::path::Path) {
+    // Verify no selfci-export-* bookmarks remain in jj.
     let bookmarks = cmd!("jj", "bookmark", "list")
         .dir(repo_path)
         .read()
@@ -190,7 +195,27 @@ fn test_jj_bookmark_cleanup_on_clone_failure() {
 
     assert!(
         stale_bookmarks.is_empty(),
-        "No selfci-export-* bookmarks should remain after failed clone, but found:\n{}",
+        "No selfci-export-* bookmarks should remain, but found:\n{}",
         stale_bookmarks.join("\n")
+    );
+
+    // The temporary jj bookmarks are exported to git refs before cloning. Verify
+    // those refs are gone too, so a later jj import cannot resurrect them.
+    let git_refs = cmd!("git", "show-ref")
+        .dir(repo_path)
+        .stderr_null()
+        .unchecked()
+        .read()
+        .expect("Failed to list git refs");
+
+    let stale_git_refs: Vec<&str> = git_refs
+        .lines()
+        .filter(|line| line.contains("refs/heads/selfci-export-"))
+        .collect();
+
+    assert!(
+        stale_git_refs.is_empty(),
+        "No selfci-export-* git refs should remain, but found:\n{}",
+        stale_git_refs.join("\n")
     );
 }

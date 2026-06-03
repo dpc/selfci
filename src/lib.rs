@@ -53,6 +53,56 @@ pub fn get_vcs(root: &Path, forced_vcs: Option<&str>) -> Result<VCS, VCSError> {
     }
 }
 
+fn cleanup_jj_export_bookmarks(root_dir: &Path, bookmarks: &[String]) {
+    let mut deleted_any = false;
+    for bookmark in bookmarks {
+        if cmd!("jj", "bookmark", "delete", "--quiet", bookmark)
+            .dir(root_dir)
+            .run()
+            .is_ok()
+        {
+            deleted_any = true;
+        }
+    }
+
+    // The temporary bookmarks are exported to git refs before cloning. Delete the
+    // git refs too; otherwise the next jj import can resurrect the bookmarks.
+    if deleted_any {
+        let _ = cmd!("jj", "git", "export", "--quiet").dir(root_dir).run();
+    }
+}
+
+fn cleanup_stale_jj_export_bookmarks(root_dir: &Path) {
+    let Ok(bookmarks) = cmd!("jj", "bookmark", "list").dir(root_dir).read() else {
+        return;
+    };
+
+    let stale_bookmarks: Vec<String> = bookmarks
+        .lines()
+        .filter_map(stale_selfci_export_bookmark)
+        .collect();
+
+    cleanup_jj_export_bookmarks(root_dir, &stale_bookmarks);
+}
+
+fn stale_selfci_export_bookmark(line: &str) -> Option<String> {
+    let bookmark = line.split(':').next()?;
+    let suffix = bookmark
+        .strip_prefix("selfci-export-base-")
+        .or_else(|| bookmark.strip_prefix("selfci-export-candidate-"))?;
+    let pid = suffix.split('-').next()?;
+    let proc_dir = Path::new("/proc");
+    if !proc_dir.is_dir() {
+        return None;
+    }
+    let _: u32 = pid.parse().ok()?;
+    if proc_dir.join(pid).exists() {
+        return None;
+    }
+
+    Some(bookmark.to_string())
+}
+
 pub fn copy_revisions_to_workdirs(
     vcs: &VCS,
     root_dir: &Path,
@@ -64,6 +114,7 @@ pub fn copy_revisions_to_workdirs(
 ) -> Result<(), VCSOperationError> {
     match vcs {
         VCS::Jujutsu => {
+            cleanup_stale_jj_export_bookmarks(root_dir);
             // Generate unique suffix for temporary bookmark names (pid + timestamp)
             let suffix = format!(
                 "{}-{}",
@@ -87,6 +138,14 @@ pub fn copy_revisions_to_workdirs(
             // By creating temporary bookmarks and exporting them via `jj git export`, we make
             // the commits reachable from git refs, allowing `git clone` to fetch them.
             // The bookmarks are deleted after cloning completes (or on error).
+            // Guard bookmark cleanup so it runs even if bookmark creation or
+            // subsequent operations fail.
+            let root_dir_owned = root_dir.to_path_buf();
+            let cleanup_bookmarks = vec![base_bookmark.clone(), candidate_bookmark.clone()];
+            let _bookmark_cleanup = scopeguard::guard((), move |_| {
+                cleanup_jj_export_bookmarks(&root_dir_owned, &cleanup_bookmarks);
+            });
+
             cmd!(
                 "jj",
                 "bookmark",
@@ -112,20 +171,6 @@ pub fn copy_revisions_to_workdirs(
             .dir(root_dir)
             .run()
             .map_err(VCSOperationError::CommandFailed)?;
-
-            // Guard bookmark cleanup so it runs even if subsequent operations fail.
-            // Without this, errors in git export or clone leave stale bookmarks behind.
-            let root_dir_owned = root_dir.to_path_buf();
-            let base_bm = base_bookmark.clone();
-            let candidate_bm = candidate_bookmark.clone();
-            let _bookmark_cleanup = scopeguard::guard((), move |_| {
-                let _ = cmd!("jj", "bookmark", "delete", "--quiet", &base_bm)
-                    .dir(&root_dir_owned)
-                    .run();
-                let _ = cmd!("jj", "bookmark", "delete", "--quiet", &candidate_bm)
-                    .dir(&root_dir_owned)
-                    .run();
-            });
 
             // Export jj bookmarks to git refs. This makes the commits reachable
             // from git's perspective, so `git clone` will include them.
