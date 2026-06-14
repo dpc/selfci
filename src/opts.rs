@@ -24,19 +24,19 @@ pub enum Commands {
     /// Run CI checks
     Check {
         /// Root working directory
-        #[arg(long, env = envs::SELFCI_ROOT_DIR)]
+        #[arg(long, short = 'r', env = envs::SELFCI_ROOT_DIR)]
         root: Option<String>,
 
         /// Base revision to compare against
-        #[arg(long)]
+        #[arg(long, short = 'b')]
         base: Option<String>,
 
         /// Candidate revision to check
-        #[arg(long)]
+        #[arg(long, short = 'c')]
         candidate: Option<String>,
 
         /// Print output to stdout in real-time (otherwise only on failure)
-        #[arg(long)]
+        #[arg(long, short = 'p')]
         print_output: bool,
 
         /// Number of checks to run in parallel (default: number of CPUs)
@@ -74,7 +74,7 @@ pub enum StepCommands {
     /// Mark the last started step as failed
     Fail {
         /// Ignore this failure (don't fail the job)
-        #[arg(long)]
+        #[arg(long, short = 'i')]
         ignore: bool,
     },
 }
@@ -91,7 +91,7 @@ pub enum JobCommands {
         /// Name of the job to wait for
         name: String,
         /// Wait for successful completion (fail if job fails)
-        #[arg(long)]
+        #[arg(long, short = 's')]
         success: bool,
     },
 }
@@ -101,7 +101,7 @@ pub enum MQCommands {
     /// Start the merge queue daemon
     Start {
         /// Base branch to merge into (defaults to mq.base-branch from config)
-        #[arg(long)]
+        #[arg(long, short = 'b')]
         base_branch: Option<String>,
 
         /// Run in foreground (don't daemonize)
@@ -109,7 +109,7 @@ pub enum MQCommands {
         foreground: bool,
 
         /// Override log file location
-        #[arg(long)]
+        #[arg(long, short = 'l')]
         log_file: Option<PathBuf>,
     },
     /// Add a candidate to the merge queue
@@ -122,7 +122,7 @@ pub enum MQCommands {
         no_merge: bool,
 
         /// Wait for this run to complete
-        #[arg(long)]
+        #[arg(long, short = 'w')]
         wait: bool,
     },
     /// Check a candidate without merging (alias for `add --no-merge`)
