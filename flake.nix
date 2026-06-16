@@ -118,10 +118,13 @@
               }
             );
         selfci = multiBuild.selfci;
+        mq = pkgs.writeShellScriptBin "mq" ''
+          exec ${selfci}/bin/selfci mq add --wait "$@"
+        '';
       in
       {
         packages = {
-          inherit selfci;
+          inherit selfci mq;
           default = selfci;
         };
 
