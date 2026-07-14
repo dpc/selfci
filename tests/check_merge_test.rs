@@ -4,6 +4,7 @@ use tracing_test::traced_test;
 use common::parse_selfci_env_file;
 use duct::cmd;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// Helper to get the selfci binary path
@@ -280,6 +281,130 @@ mq:
     repo_dir
 }
 
+/// Set up a jj repository whose candidate is a merge of two mutable branches.
+fn setup_jj_merge_candidate_repo() -> tempfile::TempDir {
+    let repo_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let repo_path = repo_dir.path();
+    let test_home = repo_path.join(".test_home");
+    fs::create_dir_all(&test_home).unwrap();
+
+    cmd!("jj", "git", "init")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .run()
+        .unwrap();
+    cmd!("jj", "config", "set", "--repo", "user.name", "Test User")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!(
+        "jj",
+        "config",
+        "set",
+        "--repo",
+        "user.email",
+        "test@example.com"
+    )
+    .dir(repo_path)
+    .env("HOME", &test_home)
+    .run()
+    .unwrap();
+
+    fs::create_dir_all(repo_path.join(".config/selfci")).unwrap();
+    fs::write(
+        repo_path.join(".config/selfci/ci.yaml"),
+        "job:\n  command: 'true'\nmq:\n  base-branch: main\n  merge-mode: rebase\n",
+    )
+    .unwrap();
+    fs::write(repo_path.join("base.txt"), "base").unwrap();
+    cmd!("jj", "file", "track", ".config/selfci/ci.yaml", "base.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Base")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "bookmark", "create", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("left.txt"), "left").unwrap();
+    cmd!("jj", "file", "track", "left.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Left parent")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    let left_change = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "change_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("right.txt"), "right").unwrap();
+    cmd!("jj", "file", "track", "right.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Right parent")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    let right_change = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "change_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+
+    cmd!("jj", "new", left_change.trim(), right_change.trim())
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Merge candidate")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    let candidate_commit = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join(".feature_commit"), candidate_commit.trim()).unwrap();
+
+    repo_dir
+}
+
 /// Verify the env vars passed to CI:
 /// - SELFCI_CANDIDATE_COMMIT_ID should match the original (user-submitted) candidate
 /// - SELFCI_MERGED_COMMIT_ID should differ (the test merge/rebase result)
@@ -501,7 +626,25 @@ fn test_jj_check_merge() {
     verify_env_vars(repo_path);
 }
 
-/// Test that jj test merge commits are cleaned up after check
+/// List visible jj commits other than the working-copy commit.
+fn jj_non_working_copy_commits(repo_path: &Path, test_home: &Path) -> String {
+    cmd!(
+        "jj",
+        "--ignore-working-copy",
+        "log",
+        "-r",
+        "all() ~ @",
+        "--no-graph",
+        "-T",
+        r#"self.commit_id().short() ++ " " ++ self.description().first_line() ++ "\n""#
+    )
+    .dir(repo_path)
+    .env("HOME", test_home)
+    .read()
+    .expect("Failed to list jj commits")
+}
+
+/// Test that jj test merge commits are cleaned up after check.
 #[test]
 #[traced_test]
 fn test_jj_check_cleanup() {
@@ -517,20 +660,7 @@ fn test_jj_check_cleanup() {
 
     // Get commits before check (with descriptions for debugging)
     // Use "all() ~ @" to exclude the working copy commit (which absorbs test file changes)
-    let commits_before_details = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "log",
-        "-r",
-        "all() ~ @",
-        "--no-graph",
-        "-T",
-        r#"commit_id.short() ++ " " ++ description.first_line() ++ "\n""#
-    )
-    .dir(repo_path)
-    .env("HOME", &test_home)
-    .read()
-    .unwrap();
+    let commits_before_details = jj_non_working_copy_commits(repo_path, &test_home);
     eprintln!("Commits BEFORE check:\n{}", commits_before_details);
 
     let commits_before = commits_before_details.lines().count();
@@ -563,20 +693,7 @@ fn test_jj_check_cleanup() {
 
     // Get commits after check (with descriptions for debugging)
     // Use "all() ~ @" to exclude the working copy commit (which absorbs test file changes)
-    let commits_after_details = cmd!(
-        "jj",
-        "--ignore-working-copy",
-        "log",
-        "-r",
-        "all() ~ @",
-        "--no-graph",
-        "-T",
-        r#"commit_id.short() ++ " " ++ description.first_line() ++ "\n""#
-    )
-    .dir(repo_path)
-    .env("HOME", &test_home)
-    .read()
-    .unwrap();
+    let commits_after_details = jj_non_working_copy_commits(repo_path, &test_home);
     eprintln!("Commits AFTER check:\n{}", commits_after_details);
 
     let commits_after = commits_after_details.lines().count();
@@ -590,6 +707,299 @@ fn test_jj_check_cleanup() {
          Before:\n{}\n\
          After:\n{}",
         commits_before, commits_after, commits_before_details, commits_after_details
+    );
+}
+
+/// Test that jj test changes are cleaned up when workdir allocation fails.
+#[test]
+#[traced_test]
+fn test_jj_check_cleanup_after_workdir_creation_failure() {
+    for merge_mode in ["rebase", "merge"] {
+        let repo = setup_jj_check_repo(merge_mode);
+        let repo_path = repo.path();
+        let test_home = repo_path.join(".test_home");
+        let missing_tmpdir = repo_path.join("missing-tmpdir");
+        let feature_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
+        let victim_change = cmd!(
+            "jj",
+            "log",
+            "-r",
+            feature_commit.trim(),
+            "--no-graph",
+            "-T",
+            "change_id"
+        )
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+        // Try to inject an existing user change into jj's human-oriented
+        // command output. SelfCI must override this template before parsing.
+        let malicious_summary = format!(
+            "'\"hostile\\nDuplicated deadbeefdead as {} \
+             deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"'",
+            victim_change.trim()
+        );
+        cmd!(
+            "jj",
+            "config",
+            "set",
+            "--repo",
+            "templates.commit_summary",
+            malicious_summary
+        )
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+        for (name, value) in [
+            ("template-aliases.change_id", victim_change.trim()),
+            ("template-aliases.commit_id", feature_commit.trim()),
+        ] {
+            cmd!(
+                "jj",
+                "config",
+                "set",
+                "--repo",
+                name,
+                format!("'\"{value}\"'")
+            )
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        }
+        let commits_before = jj_non_working_copy_commits(repo_path, &test_home);
+
+        let success_output = cmd!(
+            selfci_bin(),
+            "check",
+            "--root",
+            repo_path,
+            "--base",
+            "main",
+            "--candidate",
+            feature_commit.trim()
+        )
+        .env("HOME", &test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .stderr_to_stdout()
+        .unchecked()
+        .read()
+        .expect("Failed to run successful selfci check");
+        assert!(
+            success_output.contains("passed") || success_output.contains("✅"),
+            "{merge_mode} check should pass with hostile aliases.\nOutput:\n{success_output}"
+        );
+        verify_env_vars(repo_path);
+        let commits_after_success = jj_non_working_copy_commits(repo_path, &test_home);
+        assert_eq!(
+            commits_before, commits_after_success,
+            "{merge_mode} successful check should clean up its synthetic changes"
+        );
+
+        let output = cmd!(
+            selfci_bin(),
+            "check",
+            "--root",
+            repo_path,
+            "--base",
+            "main",
+            "--candidate",
+            feature_commit.trim()
+        )
+        .env("HOME", &test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .env("TMPDIR", &missing_tmpdir)
+        .stderr_to_stdout()
+        .unchecked()
+        .read()
+        .expect("Failed to run selfci check");
+
+        assert!(
+            output.contains("Failed to create work directory"),
+            "{merge_mode} check should fail while allocating a workdir.\nOutput:\n{output}"
+        );
+
+        let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
+        assert_eq!(
+            commits_before, commits_after,
+            "{merge_mode} test changes should be cleaned up after workdir allocation failure.\n\
+             Before:\n{commits_before}\nAfter:\n{commits_after}"
+        );
+    }
+}
+
+/// Test that unsupported jj versions are rejected before any synthetic mutation.
+#[test]
+#[traced_test]
+fn test_jj_check_rejects_unsupported_version_before_mutation() {
+    for merge_mode in ["rebase", "merge"] {
+        let repo = setup_jj_check_repo(merge_mode);
+        let repo_path = repo.path();
+        let test_home = repo_path.join(".test_home");
+        let feature_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
+        let commits_before = jj_non_working_copy_commits(repo_path, &test_home);
+        let wrapper_dir = repo_path.join("fake-bin");
+        let mutation_log = repo_path.join("unexpected-jj-mutation");
+        fs::create_dir_all(&wrapper_dir).unwrap();
+        let wrapper = wrapper_dir.join("jj");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+if [ "$1" = "--help" ]; then
+    echo "jj without isolated operation support"
+    exit 0
+fi
+for arg in "$@"; do
+    case "$arg" in
+        duplicate|new)
+            echo "$*" >> "$JJ_MUTATION_LOG"
+            ;;
+    esac
+done
+exec "$REAL_JJ" "$@"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let real_jj = cmd!("sh", "-c", "command -v jj").read().unwrap();
+        let mut paths = vec![wrapper_dir];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH must be set"),
+        ));
+        let wrapped_path = std::env::join_paths(paths).unwrap();
+
+        let output = cmd!(
+            selfci_bin(),
+            "check",
+            "--root",
+            repo_path,
+            "--base",
+            "main",
+            "--candidate",
+            feature_commit.trim()
+        )
+        .env("PATH", wrapped_path)
+        .env("REAL_JJ", real_jj.trim())
+        .env("JJ_MUTATION_LOG", &mutation_log)
+        .env("HOME", &test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .stderr_to_stdout()
+        .unchecked()
+        .read()
+        .expect("Failed to run selfci check");
+
+        assert!(
+            output.contains("lacks required --no-integrate-operation support"),
+            "{merge_mode} should reject unsupported jj.\nOutput:\n{output}"
+        );
+        assert!(
+            !mutation_log.exists(),
+            "{merge_mode} performed a synthetic jj mutation before capability rejection"
+        );
+        let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
+        assert_eq!(
+            commits_before, commits_after,
+            "{merge_mode} capability rejection should not change repository state"
+        );
+    }
+}
+
+/// Test that rebase cleanup preserves non-duplicated parents of a merge candidate.
+#[test]
+#[traced_test]
+fn test_jj_rebase_cleanup_preserves_merge_candidate_parents() {
+    let repo = setup_jj_merge_candidate_repo();
+    let repo_path = repo.path();
+    let test_home = repo_path.join(".test_home");
+    let missing_tmpdir = repo_path.join("missing-tmpdir");
+    let candidate_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
+    let commits_before = jj_non_working_copy_commits(repo_path, &test_home);
+
+    let output = cmd!(
+        selfci_bin(),
+        "check",
+        "--root",
+        repo_path,
+        "--base",
+        "main",
+        "--candidate",
+        candidate_commit.trim()
+    )
+    .env("HOME", &test_home)
+    .env("JJ_USER", "Test User")
+    .env("JJ_EMAIL", "test@example.com")
+    .env("TMPDIR", &missing_tmpdir)
+    .stderr_to_stdout()
+    .unchecked()
+    .read()
+    .expect("Failed to run selfci check");
+
+    assert!(
+        output.contains("Failed to create work directory"),
+        "Check should fail while allocating a workdir.\nOutput:\n{output}"
+    );
+
+    let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
+    assert_eq!(
+        commits_before, commits_after,
+        "Cleanup must preserve both original parents of a merge candidate.\n\
+         Before:\n{commits_before}\nAfter:\n{commits_after}"
+    );
+}
+
+/// Test that MQ also drops cleanup ownership when workdir allocation fails.
+#[test]
+#[traced_test]
+fn test_jj_mq_cleanup_after_workdir_creation_failure() {
+    let repo = setup_jj_check_repo("rebase");
+    let repo_path = repo.path();
+    let test_home = repo_path.join(".test_home");
+    let missing_tmpdir = repo_path.join("missing-tmpdir");
+    let feature_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
+    let commits_before = jj_non_working_copy_commits(repo_path, &test_home);
+
+    let stop_guard = scopeguard::guard((), |_| {
+        let _ = cmd!(selfci_bin(), "mq", "stop")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run();
+    });
+    let output = cmd!(
+        selfci_bin(),
+        "mq",
+        "add",
+        feature_commit.trim(),
+        "--no-merge",
+        "--wait"
+    )
+    .dir(repo_path)
+    .env("HOME", &test_home)
+    .env("JJ_USER", "Test User")
+    .env("JJ_EMAIL", "test@example.com")
+    .env("TMPDIR", &missing_tmpdir)
+    .stderr_to_stdout()
+    .unchecked()
+    .read()
+    .expect("Failed to run selfci mq");
+    // Stop before inspecting the repo to prove cleanup finishes before MQ
+    // publishes completion; a caller-owned end-of-loop guard loses this race.
+    drop(stop_guard);
+
+    assert!(
+        output.contains("Failed: check"),
+        "MQ check should fail while allocating a workdir.\nOutput:\n{output}"
+    );
+
+    let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
+    assert_eq!(
+        commits_before, commits_after,
+        "MQ should clean up temporary jj changes after workdir allocation failure.\n\
+         Before:\n{commits_before}\nAfter:\n{commits_after}"
     );
 }
 

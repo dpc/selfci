@@ -202,8 +202,8 @@ fn resolve_jujutsu_revision(
             source: e,
         })?;
 
-    // Use jj log with template to get both change ID and commit ID
-    // Template: change_id + newline + commit_id
+    // Use method calls so user-defined aliases for the bare template keywords
+    // cannot alter machine-readable revision IDs.
     let output = cmd!(
         "jj",
         "log",
@@ -211,7 +211,8 @@ fn resolve_jujutsu_revision(
         "-r",
         user.as_str(),
         "-T",
-        r#"change_id ++ "\n" ++ commit_id"#
+        r#"self.change_id() ++ " " ++ self.commit_id() ++ "\n""#,
+        "--color=never"
     )
     .dir(root_dir)
     .read()
@@ -221,27 +222,19 @@ fn resolve_jujutsu_revision(
         source: e,
     })?;
 
-    let mut lines = output.lines();
-    let change_id_str = lines
-        .next()
-        .ok_or_else(|| RevisionError::InvalidOutput {
+    let parts: Vec<_> = output.split_whitespace().collect();
+    if parts.len() != 2
+        || parts[0].len() != 32
+        || !parts[0].bytes().all(|byte| byte.is_ascii_lowercase())
+    {
+        return Err(RevisionError::InvalidOutput {
             vcs: "jujutsu".to_string(),
             output: output.clone(),
-        })?
-        .trim()
-        .to_string();
+        });
+    }
 
-    let commit_id_str = lines
-        .next()
-        .ok_or_else(|| RevisionError::InvalidOutput {
-            vcs: "jujutsu".to_string(),
-            output: output.clone(),
-        })?
-        .trim()
-        .to_string();
-
-    let change_id = ChangeId::new(change_id_str);
-    let commit_id = CommitId::new(commit_id_str)?;
+    let change_id = ChangeId::new(parts[0]);
+    let commit_id = CommitId::new(parts[1])?;
 
     Ok(ResolvedRevision {
         user,

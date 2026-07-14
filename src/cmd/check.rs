@@ -195,6 +195,9 @@ impl SharedJobStates {
 /// If `post_clone_hook` is provided, it will be run after worktrees are created but before
 /// the job starts. The hook receives environment variables for the worktree paths.
 ///
+/// If `test_merge_cleanup` is provided, it is run as soon as worktree export succeeds and
+/// remains armed as a drop guard if setup fails before then.
+///
 /// The `original_candidate` parameter is used in MQ mode to distinguish between:
 /// - The original candidate (what the user submitted) -> SELFCI_CANDIDATE_* env vars
 /// - The working candidate (after test merge/rebase) -> SELFCI_MERGED_* env vars
@@ -205,6 +208,7 @@ pub fn run_candidate_check(
     root_dir: &Path,
     base_rev: &ResolvedRevision,
     candidate_rev: &ResolvedRevision,
+    mut test_merge_cleanup: Option<super::mq::JjTestChangeCleanup>,
     parallelism: usize,
     forced_vcs: Option<&str>,
     mode: CheckMode,
@@ -250,17 +254,9 @@ pub fn run_candidate_check(
         root_config.job.clone_mode,
     )?;
 
-    // For jj: abandon test merge commits after they're exported to git
-    // This ensures commits are cloned but don't clutter user's jj log during tests
-    if matches!(vcs, selfci::VCS::Jujutsu)
-        && original_candidate
-            .is_some_and(|candidate| candidate.change_id != candidate_rev.change_id)
-    {
-        super::mq::abandon_jj_test_merge(
-            root_dir,
-            candidate_rev.change_id.as_str(),
-            base_rev.commit_id.as_str(),
-        );
+    // The temporary jj changes are no longer needed once export has completed.
+    if let Some(cleanup) = test_merge_cleanup.as_mut() {
+        cleanup.cleanup();
     }
 
     // Run post-clone hook if configured
@@ -712,12 +708,13 @@ pub fn check(
     // Create test merge/rebase of candidate onto base for CI testing
     // This ensures we test what would actually be merged, just like MQ mode
     // Skip test merge if base and candidate are the same commit (nothing to merge)
+    let mut test_merge_cleanup = None;
     let merged_candidate = if resolved_base.commit_id == resolved_candidate.commit_id {
         debug!("Base and candidate are the same commit, skipping test merge");
         resolved_candidate.clone()
     } else {
         // Use the resolved base commit ID (works with both branch names and commit hashes)
-        let test_merge_result = super::mq::create_test_merge(
+        let mut test_merge_result = super::mq::create_test_merge(
             &root_dir,
             resolved_base.commit_id.as_str(),
             &resolved_candidate,
@@ -733,11 +730,10 @@ pub fn check(
             merged_change = %test_merge_result.change_id,
             "Created test merge"
         );
+        test_merge_cleanup = test_merge_result.cleanup.take();
 
-        // Create a ResolvedRevision for the merged commit
-        // Note: jj test merge commits are abandoned immediately after creation,
-        // so they don't clutter the user's jj log. They remain accessible by
-        // change_id/commit_id for the workdir clone.
+        // Create a ResolvedRevision for the merged commit. Temporary jj changes
+        // remain available until the workdir clone exports them to Git.
         selfci::revision::ResolvedRevision {
             user: resolved_candidate.user.clone(),
             commit_id: test_merge_result.commit_id,
@@ -770,6 +766,7 @@ pub fn check(
         &root_dir,
         &resolved_base,
         &merged_candidate,
+        test_merge_cleanup,
         parallelism,
         forced_vcs,
         CheckMode::Inline { print_output },

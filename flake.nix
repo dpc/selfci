@@ -3,6 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     flakebox.url = "github:rustshop/flakebox?rev=62af969ab344229d2a0d585a482293b3f186b221";
 
@@ -16,6 +17,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-unstable,
       flake-utils,
       flakebox,
       bundlers,
@@ -27,6 +29,7 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        unstablePkgs = nixpkgs-unstable.legacyPackages.${system};
         projectName = "selfci";
 
         flakeboxLib = flakebox.lib.mkLib pkgs {
@@ -102,7 +105,7 @@
                   cargoArtifacts = workspace;
                   nativeBuildInputs = with pkgs; [
                     git
-                    jujutsu
+                    unstablePkgs.jujutsu
                   ];
                   env = {
                     NEXTEST_SHOW_PROGRESS = "none";

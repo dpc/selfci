@@ -76,6 +76,8 @@ error_set! {
         BranchUpdateFailed(std::io::Error),
         #[display("Failed to get change ID")]
         ChangeIdFailed(std::io::Error),
+        #[display("Unsupported Jujutsu: {0}")]
+        UnsupportedJj(std::io::Error),
     }
 }
 

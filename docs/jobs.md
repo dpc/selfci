@@ -27,7 +27,7 @@ Two worktrees are created:
 - **Base worktree**: Contains the base commit (e.g., `main` branch)
 - **Candidate worktree**: Contains the **test-merged** candidate commit
 
-The job command runs in the candidate worktree directory. After the check completes, the test merge is cleaned up (it's never pushed or permanently stored).
+The job command runs in the candidate worktree directory. For Jujutsu repositories, SelfCI requires a `jj` version with `--no-integrate-operation` support. Synthetic changes are prepared in an isolated operation, tracked by their exact change IDs, made visible only for worktree export, and then removed. Setup failures also trigger cleanup; if cleanup itself fails, SelfCI warns that manual cleanup may be required.
 
 ## Environment Variables
 

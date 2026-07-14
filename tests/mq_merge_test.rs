@@ -425,10 +425,16 @@ fn verify_all_merged_git(repo_path: &Path, num_candidates: usize, merge_mode: &s
 }
 
 /// Verify that all candidates were merged into main (jj)
-fn verify_all_merged_jj(repo_path: &Path, num_candidates: usize, merge_mode: &str) {
+fn verify_all_merged_jj(
+    repo_path: &Path,
+    test_home: &Path,
+    num_candidates: usize,
+    merge_mode: &str,
+) {
     // Check all feature files exist in main bookmark
     let files = cmd!("jj", "file", "list", "-r", "main")
         .dir(repo_path)
+        .env("HOME", test_home)
         .read()
         .unwrap();
 
@@ -454,6 +460,7 @@ fn verify_all_merged_jj(repo_path: &Path, num_candidates: usize, merge_mode: &st
         "description"
     )
     .dir(repo_path)
+    .env("HOME", test_home)
     .read()
     .unwrap();
 
@@ -482,6 +489,7 @@ fn verify_all_merged_jj(repo_path: &Path, num_candidates: usize, merge_mode: &st
         &format!("ancestors(main, {})", 5 + num_candidates * 3)
     )
     .dir(repo_path)
+    .env("HOME", test_home)
     .run()
     .unwrap();
 }
@@ -608,7 +616,7 @@ fn run_jj_merge_test(merge_mode: &str, num_candidates: usize) {
     verify_working_dir_unchanged_jj(repo_path);
 
     // Verify all candidates were merged
-    verify_all_merged_jj(repo_path, num_candidates, merge_mode);
+    verify_all_merged_jj(repo_path, &test_home, num_candidates, merge_mode);
 }
 
 fn run_jj_candidate(repo_path: &Path, test_home: &Path, candidate: &str, no_merge: bool) {
