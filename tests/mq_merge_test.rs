@@ -4,6 +4,7 @@ use duct::cmd;
 use selfci::constants;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 use tracing::info;
@@ -105,6 +106,39 @@ fn extract_run_id(output: &str) -> u64 {
         .and_then(|s| s.split_whitespace().next())
         .and_then(|s| s.parse().ok())
         .expect("Failed to extract run ID")
+}
+
+/// Unblocks the test job and ensures its daemon or stop client is reaped.
+struct BlockingCheckCleanup {
+    /// File that lets the test job finish.
+    release_path: PathBuf,
+    /// Repository used to discover the daemon.
+    repo_path: PathBuf,
+    /// Explicit daemon runtime directory.
+    runtime_dir: PathBuf,
+    /// In-flight `mq stop` client, when one has been started.
+    stop_process: Option<Child>,
+    /// Whether cleanup still needs to stop the daemon.
+    armed: bool,
+}
+
+impl Drop for BlockingCheckCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        let _ = fs::write(&self.release_path, "");
+        if let Some(mut stop) = self.stop_process.take() {
+            let _ = stop.wait();
+        } else {
+            let _ = Command::new(selfci_bin())
+                .args(["mq", "stop"])
+                .current_dir(&self.repo_path)
+                .env("SELFCI_MQ_RUNTIME_DIR", &self.runtime_dir)
+                .status();
+        }
+    }
 }
 
 /// Setup a base Git repository with just main branch and initial commit
@@ -1079,6 +1113,132 @@ fn test_mq_stop_via_command() {
     );
 }
 
+/// Graceful shutdown drains active and queued checks, then removes their worktrees.
+#[test]
+#[traced_test]
+fn test_mq_stop_drains_checks_and_cleans_worktrees() {
+    let repo = setup_git_base_repo("rebase");
+    let repo_path = repo.path();
+    let runtime_dir = repo_path.join(".selfci-mq-runtime");
+    let temp_root = repo_path.join("tmp");
+    let job_started = repo_path.join("job-started");
+    let job_release = repo_path.join("job-release");
+    fs::create_dir(&temp_root).unwrap();
+
+    fs::write(
+        repo_path.join(".config/selfci/ci.yaml"),
+        format!(
+            r#"job:
+  command: 'echo started >> {started}; while test ! -e {release}; do sleep 0.05; done'
+mq:
+  base-branch: main
+  merge-mode: rebase
+"#,
+            started = job_started.display(),
+            release = job_release.display(),
+        ),
+    )
+    .unwrap();
+    git!("add", ".config/selfci/ci.yaml")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    git!("commit", "--amend", "--no-edit")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    let candidate = create_git_candidate(repo_path, 1);
+
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .env("SELFCI_LOG", "debug")
+        .env("TMPDIR", &temp_root)
+        .run()
+        .unwrap();
+    let mut cleanup = BlockingCheckCleanup {
+        release_path: job_release.clone(),
+        repo_path: repo_path.to_path_buf(),
+        runtime_dir: runtime_dir.clone(),
+        stop_process: None,
+        armed: true,
+    };
+    wait_for_daemon_ready_with_env(repo_path, &runtime_dir, 10);
+    for _ in 0..2 {
+        cmd!(selfci_bin(), "mq", "add", "--no-merge", &candidate)
+            .dir(repo_path)
+            .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+            .run()
+            .unwrap();
+    }
+
+    for _ in 0..200 {
+        if fs::read_to_string(&job_started).is_ok_and(|started| started.lines().count() == 1) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        fs::read_to_string(&job_started)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        1,
+        "first candidate check did not start or second run was not queued"
+    );
+
+    cleanup.stop_process = Some(
+        Command::new(selfci_bin())
+            .args(["mq", "stop"])
+            .current_dir(repo_path)
+            .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+            .spawn()
+            .unwrap(),
+    );
+
+    let daemon_log = runtime_dir.join("mq.log");
+    let shutdown_log = "Shutdown requested, exiting daemon loop";
+    let mut shutdown_started = false;
+    for _ in 0..200 {
+        if fs::read_to_string(&daemon_log).is_ok_and(|log| log.contains(shutdown_log)) {
+            shutdown_started = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let stopped_before_release = cleanup
+        .stop_process
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_some();
+
+    fs::write(&job_release, "").unwrap();
+    let stop_status = cleanup.stop_process.take().unwrap().wait().unwrap();
+    cleanup.armed = false;
+    assert!(shutdown_started, "daemon did not begin graceful shutdown");
+    assert!(stop_status.success(), "mq stop failed");
+    assert!(
+        !stopped_before_release,
+        "daemon stopped before its active check completed"
+    );
+    assert_eq!(
+        fs::read_to_string(&job_started).unwrap().lines().count(),
+        2,
+        "daemon did not drain the queued candidate check"
+    );
+
+    let leftovers: Vec<_> = fs::read_dir(&temp_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "daemon shutdown left temporary paths behind: {leftovers:?}"
+    );
+}
+
 /// Test that stopping the MQ daemon via SIGTERM signal works correctly
 #[test]
 #[traced_test]
@@ -1181,7 +1341,7 @@ fn test_mq_stop_foreground_via_command() {
 fn test_mq_stop_foreground_via_signal() {
     use nix::sys::signal::{self, Signal};
     use nix::unistd::Pid;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let repo = setup_git_base_repo("rebase");
     let repo_path = repo.path();

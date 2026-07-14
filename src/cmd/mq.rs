@@ -352,6 +352,14 @@ fn try_resolve_base_branch_from_config(root_dir: &Path) -> Option<String> {
     config.mq?.base_branch
 }
 
+/// Messages handled by the merge queue processor.
+enum QueueMessage {
+    /// Process a candidate run already sent to the queue processor.
+    Run(mq_protocol::RunId),
+    /// Finish runs enqueued before this marker and stop the processor.
+    Shutdown,
+}
+
 /// Result of start_daemon_common
 struct StartDaemonResult {
     outcome: DaemonizeOutcome,
@@ -795,15 +803,15 @@ fn run_daemon_loop(
         runs: HashMap::new(),
     });
 
-    // Create channel for queueing jobs
-    let (mq_jobs_sender, mq_jobs_receiver) = mpsc::channel::<mq_protocol::RunId>();
+    // Create the queue processor's message channel
+    let (queue_sender, queue_receiver) = mpsc::channel::<QueueMessage>();
 
-    // Spawn worker thread to process queue
+    // Spawn the queue processor
     let state_clone = state.clone();
     let root_dir_clone = root_dir.clone();
-    std::thread::spawn(move || {
+    let queue_worker = std::thread::spawn(move || {
         // process_queue creates worker pools for each candidate check via run_candidate_check
-        process_queue(state_clone, root_dir_clone, mq_jobs_receiver);
+        process_queue(state_clone, root_dir_clone, queue_receiver);
     });
 
     debug!("Entering main daemon loop");
@@ -821,10 +829,10 @@ fn run_daemon_loop(
         match accepted {
             Ok((mut stream, _)) => {
                 let state_clone = state.clone();
-                let mq_runs_sender_clone = mq_jobs_sender.clone();
+                let queue_sender_clone = queue_sender.clone();
                 std::thread::spawn(move || {
                     if let Ok(request) = mq_protocol::read_mq_request(&mut stream) {
-                        let response = handle_request(&state_clone, request, mq_runs_sender_clone);
+                        let response = handle_request(&state_clone, request, queue_sender_clone);
                         let _ = mq_protocol::write_mq_response(&mut stream, response);
                     }
                 });
@@ -835,13 +843,20 @@ fn run_daemon_loop(
         }
     }
 
+    // Let work already enqueued before the shutdown marker finish before process
+    // exit. Candidate checks own temporary worktrees whose drop cleanup must not
+    // be interrupted by daemon shutdown. Late detached request handlers are not
+    // part of this queue-drain guarantee.
+    let _ = queue_sender.send(QueueMessage::Shutdown);
+    queue_worker.join().map_err(|_| MainError::CheckFailed)?;
+
     Ok(())
 }
 
 fn handle_request(
     state: &SharedMQState,
     request: mq_protocol::MQRequest,
-    mq_runs_sender: mpsc::Sender<mq_protocol::RunId>,
+    queue_sender: mpsc::Sender<QueueMessage>,
 ) -> mq_protocol::MQResponse {
     match request {
         mq_protocol::MQRequest::Hello => mq_protocol::MQResponse::HelloAck,
@@ -884,8 +899,8 @@ fn handle_request(
                 "Added candidate to queue"
             );
 
-            // Send run ID to process_queue
-            match mq_runs_sender.send(run_id) {
+            // Send the run to the queue processor
+            match queue_sender.send(QueueMessage::Run(run_id)) {
                 Ok(_) => mq_protocol::MQResponse::CandidateAdded { run_id },
                 Err(e) => mq_protocol::MQResponse::Error(format!("Failed to queue run: {}", e)),
             }
@@ -1080,7 +1095,7 @@ fn run_hook_interactive(
 fn process_queue(
     state: SharedMQState,
     root_dir: PathBuf,
-    mq_runs_receiver: mpsc::Receiver<mq_protocol::RunId>,
+    queue_receiver: mpsc::Receiver<QueueMessage>,
 ) {
     // Get VCS once at the start
     let vcs = match get_vcs(&root_dir, None) {
@@ -1092,11 +1107,15 @@ fn process_queue(
     };
 
     loop {
-        // Wait for next run ID from channel
-        let run_id = match mq_runs_receiver.recv() {
-            Ok(id) => id,
+        // Wait for the next queue message
+        let run_id = match queue_receiver.recv() {
+            Ok(QueueMessage::Run(id)) => id,
+            Ok(QueueMessage::Shutdown) => {
+                debug!("MQ queue shutdown requested");
+                break;
+            }
             Err(_) => {
-                debug!("MQ runs channel closed, exiting process_queue");
+                debug!("MQ queue channel closed, exiting process_queue");
                 break;
             }
         };

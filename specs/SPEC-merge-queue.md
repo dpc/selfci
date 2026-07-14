@@ -24,8 +24,11 @@ The daemon assigns local run IDs, processes one queued candidate at a time,
 and exposes list, status, blocking wait, PID, version, runtime-directory, and
 stop operations. Candidate checks can still execute multiple jobs
 concurrently. The current implementation holds run state and history only in
-memory; IDs restart and history disappears when the daemon restarts. Shutdown
-does not drain or join queued and running work.
+memory; IDs restart and history disappears when the daemon restarts. Graceful
+shutdown stops accepting requests, finishes work already sent to the queue
+processor, and joins that processor so run-local resources are cleaned up
+before process exit. The stop client force-kills a daemon that does not finish
+within its bounded shutdown timeout.
 
 ## Run lifecycle
 
@@ -56,8 +59,9 @@ The public run states are queued, running, and terminal passed or failed
 outcomes with a reason. Status includes available preparation, check, hook,
 step, timing, and failure information. While the serving daemon remains
 alive, `mq wait` blocks for terminal publication and reflects the terminal
-outcome in its exit status. Current shutdown can terminate queued or running
-work and its waiters without terminal publication.
+outcome in its exit status. Graceful shutdown records terminal state for work
+already sent to the queue processor, but does not join detached client handlers
+or guarantee that waiters receive that state before process exit.
 
 ## Hooks
 
