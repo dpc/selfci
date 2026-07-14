@@ -13,6 +13,34 @@ impl std::fmt::Display for CommandOutputError {
 
 impl std::error::Error for CommandOutputError {}
 
+/// An operating-system failure while controlling a daemon process.
+#[derive(Debug)]
+pub struct ProcessControlError {
+    /// Process-control operation that failed.
+    operation: &'static str,
+    /// Underlying operating-system error.
+    source: std::io::Error,
+}
+
+impl ProcessControlError {
+    /// Create a process-control error with operation context.
+    pub fn new(operation: &'static str, source: std::io::Error) -> Self {
+        Self { operation, source }
+    }
+}
+
+impl std::fmt::Display for ProcessControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "failed to {}: {}", self.operation, self.source)
+    }
+}
+
+impl std::error::Error for ProcessControlError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 error_set! {
     VCSError := {
         #[display("No supported VCS found (looking for .jj or .git directory)")]
@@ -50,6 +78,8 @@ error_set! {
         DaemonNotRunning,
         #[display("Failed to communicate with daemon")]
         CommunicationFailed,
+        #[display("{0}")]
+        ProcessControlFailed(ProcessControlError),
     }
 
     RevisionError := {
@@ -94,6 +124,7 @@ impl MainError {
             MainError::CheckFailed => crate::exit_codes::EXIT_CHECK_FAILED,
             MainError::DaemonNotRunning => crate::exit_codes::EXIT_MQ_DAEMON_NOT_RUNNING,
             MainError::CommunicationFailed => crate::exit_codes::EXIT_MQ_COMMUNICATION_FAILED,
+            MainError::ProcessControlFailed(_) => crate::exit_codes::EXIT_MQ_COMMUNICATION_FAILED,
             MainError::ResolutionFailed(e) => match e {
                 crate::revision::RevisionError::ResolutionFailed { .. } => {
                     crate::exit_codes::EXIT_REVISION_RESOLUTION_FAILED

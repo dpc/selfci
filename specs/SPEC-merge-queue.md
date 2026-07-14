@@ -28,7 +28,19 @@ memory; IDs restart and history disappears when the daemon restarts. Graceful
 shutdown stops accepting requests, finishes work already sent to the queue
 processor, and joins that processor so run-local resources are cleaned up
 before process exit. The stop client force-kills a daemon that does not finish
-within its bounded shutdown timeout.
+within 30 seconds and requires the forced process exit to be observed within a
+further 5 seconds. Stop succeeds only after the daemon is known to be absent or
+its exit has been observed. Process-observer and signal failures are reported
+and do not justify deleting possibly live runtime state. Normal graceful
+shutdown leaves runtime cleanup to the daemon; stale and forced-shutdown cleanup
+revalidates the recorded PID before removing state.
+
+The normal stop path uses the already-verified Unix socket to request shutdown,
+and the responder must acknowledge the PID recorded in the runtime directory.
+The exit watcher is armed before that request. Only the timeout fallback sends
+`SIGKILL`; on macOS this necessarily retains a narrow raw-PID reuse race between
+the final watcher check and signal delivery. PID equality narrows races but is
+not a general-purpose instance identity.
 
 ## Run lifecycle
 

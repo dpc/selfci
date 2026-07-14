@@ -65,7 +65,12 @@ sandbox commands or isolate jobs from one another. Candidate commands and
 merge-queue hooks execute with the invoking user's privileges, as recorded in
 [DESIGN-user-supplied-isolation](DESIGN-user-supplied-isolation.md).
 
-The runtime assumes a Unix process and filesystem environment, including
-Unix-domain sockets and signals. Some lifecycle and cleanup paths use
-Linux-specific facilities; this record does not establish a broader platform
-support commitment.
+The runtime supports Linux and macOS process and filesystem environments,
+including Unix-domain sockets and signals. Daemon exit is observed reactively:
+Linux uses `pidfd_open` with `poll`, while macOS uses `kqueue` with
+`EVFILT_PROC` and `NOTE_EXIT`. Android retains the Linux pidfd implementation,
+but native Linux and macOS are the platforms covered by project CI.
+Normal merge-queue shutdown is requested over its verified local socket; raw
+signals are retained for external shutdown and the bounded forced-kill fallback.
+The macOS fallback below `/tmp` is created as a same-user mode-0700 directory
+and rejects symlinks, foreign ownership, and unsafe permissions.

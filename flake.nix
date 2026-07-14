@@ -34,7 +34,10 @@
 
         flakeboxLib = flakebox.lib.mkLib pkgs {
           config = {
-            github.ci.buildOutputs = [ ".#ci.${projectName}" ];
+            github.ci.buildOutputs = [
+              ".#ci.${projectName}"
+              ".#ci.tests"
+            ];
             just.importPaths = [ "justfile.selfci.just" ];
             toolchain.channel = "latest";
             rust.rustfmt.enable = false;

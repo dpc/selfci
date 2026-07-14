@@ -128,6 +128,7 @@ pub struct MQRunInfo {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MQRequest {
     Hello,
+    Shutdown { expected_pid: libc::pid_t },
     Version,
     AddCandidate { candidate: String, no_merge: bool },
     List { limit: Option<usize> },
@@ -138,7 +139,8 @@ pub enum MQRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum MQResponse {
-    HelloAck,
+    HelloAck { pid: libc::pid_t },
+    ShutdownAck { pid: libc::pid_t },
     Version { version: String },
     CandidateAdded { run_id: RunId },
     RunList { runs: Vec<MQRunInfo> },

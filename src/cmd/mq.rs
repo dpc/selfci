@@ -1,14 +1,22 @@
+#[cfg(test)]
+#[path = "mq_tests.rs"]
+mod tests;
+
+use crate::cmd::process_exit::{ProcessExitWatcher, WaitOutcome, WatchState};
 use comfy_table::{ContentArrangement, Table, presets};
 use duct::cmd;
 use nix::sys::signal::{self, Signal};
 use nix::sys::stat::{Mode, umask};
 use nix::unistd::{ForkResult, Pid, close, dup2, fork, setsid};
 use selfci::duct_util::Cmd;
-use selfci::{MainError, WorkDirError, constants, envs, get_vcs, mq_protocol, protocol};
+use selfci::{
+    MainError, ProcessControlError, WorkDirError, constants, envs, get_vcs, mq_protocol, protocol,
+};
 use signal_hook::consts::SIGTERM;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::IntoRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -21,17 +29,54 @@ use tracing::{debug, warn};
 /// aliases for the bare `change_id` and `commit_id` template keywords.
 const JJ_MACHINE_COMMIT_SUMMARY_CONFIG: &str =
     r#"templates.commit_summary="self.change_id() ++ \" \" ++ self.commit_id()""#;
+const MQ_STOP_GRACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MQ_STOP_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Get the selfci root runtime directory, where individual runtime for each
 /// started instance are located.
 fn get_selfci_root_runtime_dir() -> Result<PathBuf, MainError> {
-    let base = dirs::runtime_dir().unwrap_or_else(|| {
-        // Fallback to /tmp/selfci-{uid} if XDG_RUNTIME_DIR not available
-        let uid = nix::unistd::getuid();
-        PathBuf::from(format!("/tmp/selfci-{}", uid))
-    });
+    let uid = nix::unistd::getuid().as_raw();
+    let root = if let Some(base) = dirs::runtime_dir() {
+        base.join("selfci")
+    } else {
+        // macOS has no XDG runtime directory. Establish a private directory
+        // directly below sticky /tmp before creating any daemon state.
+        let base = PathBuf::from(format!("/tmp/selfci-{uid}"));
+        ensure_private_runtime_directory(&base, uid)?;
+        base.join("selfci")
+    };
+    ensure_private_runtime_directory(&root, uid)?;
+    Ok(root)
+}
 
-    Ok(base.join("selfci"))
+/// Create or validate a same-user, non-symlink, mode-0700 runtime directory.
+fn ensure_private_runtime_directory(path: &Path, uid: u32) -> Result<(), MainError> {
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(WorkDirError::CreateFailed(error).into()),
+    }
+
+    let metadata = std::fs::symlink_metadata(path).map_err(WorkDirError::CreateFailed)?;
+    if !metadata.file_type().is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(WorkDirError::CreateFailed(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "runtime directory {} must be a same-user, non-symlink directory with mode 0700",
+                path.display()
+            ),
+        ))
+        .into());
+    }
+    // Normalize an overly restrictive same-user directory to the documented
+    // mode while never widening a directory that failed validation above.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(WorkDirError::CreateFailed)?;
+    Ok(())
 }
 
 /// Get the daemon runtime directory for a specific PID
@@ -86,6 +131,7 @@ fn get_project_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>
         return Ok(None);
     }
 
+    let mut unverifiable_match = None;
     for entry in std::fs::read_dir(&runtime_dir).map_err(WorkDirError::CreateFailed)? {
         let entry = entry.map_err(WorkDirError::CreateFailed)?;
         let pid_dir = entry.path();
@@ -98,28 +144,31 @@ fn get_project_daemon_runtime_dir(project_root: &Path) -> Result<Option<PathBuf>
         };
 
         if paths_equal(Path::new(stored_root.trim()), project_root) {
-            // Found matching project, verify daemon is running
-            if verify_daemon_running(&pid_dir) {
+            // Skip unverifiable state without deleting it. A crashed daemon's
+            // directory must not mask a later live daemon or prevent restart.
+            if verified_daemon_pid(&pid_dir).is_some() {
                 return Ok(Some(pid_dir));
-            } else {
-                // Stale daemon, clean up
-                std::fs::remove_dir_all(&pid_dir).ok();
             }
+            unverifiable_match.get_or_insert(pid_dir);
         }
     }
 
-    Ok(None)
+    Ok(unverifiable_match)
 }
 
-/// Verify a daemon is actually running in the given directory
-fn verify_daemon_running(daemon_dir: &Path) -> bool {
+/// Return the socket responder PID only when it matches the runtime PID file.
+fn verified_daemon_pid(daemon_dir: &Path) -> Option<libc::pid_t> {
+    let recorded_pid = std::fs::read_to_string(daemon_dir.join(constants::MQ_PID_FILENAME))
+        .ok()?
+        .trim()
+        .parse::<libc::pid_t>()
+        .ok()
+        .filter(|pid| *pid > 0)?;
     let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
-
-    // If daemon responds to Hello, it's running
-    matches!(
-        mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Hello),
-        Ok(mq_protocol::MQResponse::HelloAck)
-    )
+    match mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Hello) {
+        Ok(mq_protocol::MQResponse::HelloAck { pid }) if pid == recorded_pid => Some(pid),
+        _ => None,
+    }
 }
 
 /// Internal run entry that holds both the protocol info and runtime state
@@ -384,17 +433,25 @@ enum DaemonizeOutcome {
 
 /// Check if a daemon is already running for this project and print info if so
 fn check_daemon_already_running(root_dir: &Path) -> Result<bool, MainError> {
-    if let Some(existing_dir) = get_project_daemon_runtime_dir(root_dir)?
-        && let Ok(pid_str) = std::fs::read_to_string(existing_dir.join(constants::MQ_PID_FILENAME))
-        && let Ok(pid) = pid_str.trim().parse::<u32>()
-    {
-        println!("Merge queue daemon is already running (PID: {})", pid);
-        println!("Runtime directory: {}", existing_dir.display());
-        println!("Use 'selfci mq stop' to stop it");
-        Ok(true)
-    } else {
-        Ok(false)
+    if let Some(existing_dir) = get_project_daemon_runtime_dir(root_dir)? {
+        if let Some(pid) = verified_daemon_pid(&existing_dir) {
+            println!("Merge queue daemon is already running (PID: {})", pid);
+            println!("Runtime directory: {}", existing_dir.display());
+            println!("Use 'selfci mq stop' to stop it");
+            return Ok(true);
+        }
+        let has_runtime_state = [
+            constants::MQ_DIR_FILENAME,
+            constants::MQ_PID_FILENAME,
+            constants::MQ_SOCK_FILENAME,
+        ]
+        .iter()
+        .any(|name| existing_dir.join(name).exists());
+        if std::env::var_os(envs::SELFCI_MQ_RUNTIME_DIR).is_some() && has_runtime_state {
+            return Err(MainError::CommunicationFailed);
+        }
     }
+    Ok(false)
 }
 
 /// Daemonize the process in background mode
@@ -830,10 +887,21 @@ fn run_daemon_loop(
             Ok((mut stream, _)) => {
                 let state_clone = state.clone();
                 let queue_sender_clone = queue_sender.clone();
+                let shutdown_clone = Arc::clone(&shutdown);
+                let socket_path_clone = socket_path.clone();
                 std::thread::spawn(move || {
                     if let Ok(request) = mq_protocol::read_mq_request(&mut stream) {
+                        let shutdown_requested = matches!(
+                            request,
+                            mq_protocol::MQRequest::Shutdown { expected_pid }
+                                if expected_pid == std::process::id() as libc::pid_t
+                        );
                         let response = handle_request(&state_clone, request, queue_sender_clone);
                         let _ = mq_protocol::write_mq_response(&mut stream, response);
+                        if shutdown_requested {
+                            shutdown_clone.store(true, Ordering::SeqCst);
+                            let _ = UnixStream::connect(&socket_path_clone);
+                        }
                     }
                 });
             }
@@ -859,7 +927,17 @@ fn handle_request(
     queue_sender: mpsc::Sender<QueueMessage>,
 ) -> mq_protocol::MQResponse {
     match request {
-        mq_protocol::MQRequest::Hello => mq_protocol::MQResponse::HelloAck,
+        mq_protocol::MQRequest::Hello => mq_protocol::MQResponse::HelloAck {
+            pid: std::process::id() as libc::pid_t,
+        },
+        mq_protocol::MQRequest::Shutdown { expected_pid } => {
+            let pid = std::process::id() as libc::pid_t;
+            if expected_pid == pid {
+                mq_protocol::MQResponse::ShutdownAck { pid }
+            } else {
+                mq_protocol::MQResponse::Error("daemon PID does not match request".to_string())
+            }
+        }
 
         mq_protocol::MQRequest::Version => mq_protocol::MQResponse::Version {
             version: crate::version_string(),
@@ -3045,81 +3123,183 @@ pub fn stop_daemon() -> Result<(), MainError> {
 
     let pid_file = daemon_dir.join(constants::MQ_PID_FILENAME);
 
-    // Read PID
+    // Read and validate the PID before invoking signal APIs, where zero and
+    // negative values have process-group semantics.
     let pid = match std::fs::read_to_string(&pid_file) {
-        Ok(content) => match content.trim().parse::<u32>() {
-            Ok(p) => p,
-            Err(_) => {
-                println!("Invalid PID file, cleaning up");
-                std::fs::remove_dir_all(&daemon_dir).ok();
-                return Ok(());
+        Ok(content) => match content.trim().parse::<libc::pid_t>() {
+            Ok(pid) if pid > 0 => pid,
+            Err(_) | Ok(_) => {
+                return Err(ProcessControlError::new(
+                    "validate daemon PID",
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "daemon PID must be a positive platform process ID",
+                    ),
+                )
+                .into());
             }
         },
-        Err(_) => {
-            println!("PID file not found, cleaning up stale directory");
-            std::fs::remove_dir_all(&daemon_dir).ok();
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ProcessControlError::new("read daemon PID", error).into());
+        }
+        Err(error) => {
+            return Err(ProcessControlError::new("read daemon PID", error).into());
+        }
+    };
+
+    let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
+    let identity = match mq_protocol::send_mq_request(&socket_path, mq_protocol::MQRequest::Hello) {
+        Ok(identity) => identity,
+        Err(message) => {
+            return match ProcessExitWatcher::arm(pid)
+                .map_err(|error| ProcessControlError::new("observe stale daemon PID", error))?
+            {
+                WatchState::AlreadyExited => {
+                    println!("Process not running, cleaning up");
+                    remove_daemon_dir_if_pid(&daemon_dir, pid)
+                }
+                WatchState::Watching(_) => Err(ProcessControlError::new(
+                    "verify daemon identity",
+                    std::io::Error::other(message),
+                )
+                .into()),
+            };
+        }
+    };
+    match identity {
+        mq_protocol::MQResponse::HelloAck { pid: response_pid } if response_pid == pid => {}
+        mq_protocol::MQResponse::HelloAck { .. } => {
+            return Err(ProcessControlError::new(
+                "verify daemon identity",
+                std::io::Error::other("daemon socket PID does not match mq.pid"),
+            )
+            .into());
+        }
+        _ => return Err(MainError::CommunicationFailed),
+    }
+
+    let watcher = match ProcessExitWatcher::arm(pid)
+        .map_err(|error| ProcessControlError::new("observe daemon exit", error))?
+    {
+        WatchState::Watching(watcher) => watcher,
+        WatchState::AlreadyExited => {
+            println!("Process not running, cleaning up");
+            remove_daemon_dir_if_pid(&daemon_dir, pid)?;
             return Ok(());
         }
     };
 
-    // Check if process exists
-    if signal::kill(Pid::from_raw(pid as i32), None).is_err() {
-        println!("Process not running, cleaning up");
-        std::fs::remove_dir_all(&daemon_dir).ok();
+    let response = mq_protocol::send_mq_request(
+        &socket_path,
+        mq_protocol::MQRequest::Shutdown { expected_pid: pid },
+    )
+    .map_err(|message| {
+        ProcessControlError::new("request daemon shutdown", std::io::Error::other(message))
+    })?;
+    match response {
+        mq_protocol::MQResponse::ShutdownAck { pid: response_pid } if response_pid == pid => {}
+        mq_protocol::MQResponse::ShutdownAck { .. } => {
+            return Err(ProcessControlError::new(
+                "verify shutdown responder",
+                std::io::Error::other("daemon socket PID does not match mq.pid"),
+            )
+            .into());
+        }
+        _ => return Err(MainError::CommunicationFailed),
+    }
+
+    match watcher
+        .wait(mq_stop_timeout(
+            "SELFCI_TEST_MQ_STOP_GRACE_MS",
+            MQ_STOP_GRACE_TIMEOUT,
+        ))
+        .map_err(|error| ProcessControlError::new("wait for daemon exit", error))?
+    {
+        WaitOutcome::Exited => {
+            println!("Daemon stopped successfully");
+            return Ok(());
+        }
+        WaitOutcome::TimedOut => {}
+    }
+
+    // Check the already-armed watcher once more immediately before using the
+    // raw PID. This narrows macOS's unavoidable PID-reuse race.
+    if watcher
+        .wait(std::time::Duration::ZERO)
+        .map_err(|error| ProcessControlError::new("recheck daemon exit", error))?
+        == WaitOutcome::Exited
+    {
+        println!("Daemon stopped successfully");
         return Ok(());
     }
 
-    // Send SIGTERM for graceful shutdown
-    if signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_err() {
-        eprintln!("Failed to send SIGTERM to process {}", pid);
-        return Err(MainError::CheckFailed);
+    eprintln!("Timeout waiting for daemon to stop, sending SIGKILL...");
+    if let Err(error) = signal::kill(Pid::from_raw(pid), Signal::SIGKILL)
+        && error != nix::errno::Errno::ESRCH
+    {
+        return Err(ProcessControlError::new(
+            "send SIGKILL to daemon",
+            std::io::Error::from_raw_os_error(error as i32),
+        )
+        .into());
+    }
+    if watcher
+        .wait(mq_stop_timeout(
+            "SELFCI_TEST_MQ_STOP_KILL_MS",
+            MQ_STOP_KILL_TIMEOUT,
+        ))
+        .map_err(|error| ProcessControlError::new("wait for force-killed daemon", error))?
+        == WaitOutcome::TimedOut
+    {
+        return Err(ProcessControlError::new(
+            "wait for force-killed daemon",
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "daemon remained alive after SIGKILL",
+            ),
+        )
+        .into());
     }
 
-    // Wait for process to exit reactively using pidfd
-    match wait_for_process_exit(pid as i32, std::time::Duration::from_secs(30)) {
-        Ok(true) => {
-            println!("Daemon stopped successfully");
-        }
-        Ok(false) => {
-            eprintln!("Timeout waiting for daemon to stop, sending SIGKILL...");
-            let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-            let _ = wait_for_process_exit(pid as i32, std::time::Duration::from_secs(5));
-            println!("Daemon forcefully terminated");
-        }
-        Err(e) => {
-            debug!("pidfd wait failed ({e}), assuming daemon exited");
-        }
-    }
-
-    if daemon_dir.exists() {
-        std::fs::remove_dir_all(&daemon_dir).ok();
-    }
-
+    remove_daemon_dir_if_pid(&daemon_dir, pid)?;
+    println!("Daemon forcefully terminated");
     Ok(())
 }
 
-/// Wait for a process to exit using pidfd_open + poll (reactive, no polling).
-/// Returns Ok(true) if the process exited within the timeout, Ok(false) on timeout.
-fn wait_for_process_exit(pid: i32, timeout: std::time::Duration) -> std::io::Result<bool> {
-    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0 as libc::c_uint) };
-    if pidfd < 0 {
-        return Err(std::io::Error::last_os_error());
+/// Return a production stop timeout, with a debug-build seam for lifecycle tests.
+fn mq_stop_timeout(variable: &str, default: std::time::Duration) -> std::time::Duration {
+    if cfg!(debug_assertions)
+        && let Ok(value) = std::env::var(variable)
+        && let Ok(milliseconds) = value.parse()
+    {
+        return std::time::Duration::from_millis(milliseconds);
     }
-    let pidfd = pidfd as libc::c_int;
+    default
+}
 
-    let timeout_ms = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
-    let mut pfd = libc::pollfd {
-        fd: pidfd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-    unsafe { libc::close(pidfd) };
+/// Remove a stale daemon directory, ignoring only an already-removed directory.
+fn remove_daemon_dir(daemon_dir: &Path) -> Result<(), MainError> {
+    match std::fs::remove_dir_all(daemon_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(ProcessControlError::new("remove stale daemon runtime directory", error).into())
+        }
+    }
+}
 
-    if ret < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(ret > 0)
+/// Remove runtime state only when it still belongs to the observed daemon PID.
+fn remove_daemon_dir_if_pid(daemon_dir: &Path, expected_pid: libc::pid_t) -> Result<(), MainError> {
+    let pid_file = daemon_dir.join(constants::MQ_PID_FILENAME);
+    match std::fs::read_to_string(pid_file) {
+        Ok(contents) if contents.trim().parse::<libc::pid_t>() == Ok(expected_pid) => {
+            remove_daemon_dir(daemon_dir)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(ProcessControlError::new("verify stale daemon runtime directory", error).into())
+        }
     }
 }
 

@@ -11,7 +11,9 @@ jobs:
     - name: Magic Nix Cache
       uses: DeterminateSystems/magic-nix-cache-action@v2
     - name: Build on ${{ matrix.host }}
-      run: nix build -L .#ci.selfci
+      run: 'nix build -L .#ci.selfci
+
+        nix build -L .#ci.tests'
     strategy:
       matrix:
         host:

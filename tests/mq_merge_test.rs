@@ -1,7 +1,7 @@
 mod common;
 
 use duct::cmd;
-use selfci::constants;
+use selfci::{constants, mq_protocol};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -1433,10 +1433,12 @@ fn test_mq_start_and_helper_commands() {
     let pid: u32 = pid_str.trim().parse().expect("pid should be a number");
     assert!(pid > 0, "pid should be positive");
 
-    // Verify the daemon process exists
-    assert!(
-        std::path::Path::new(&format!("/proc/{}", pid)).exists(),
-        "daemon process should exist"
+    // Verify the daemon process exists using the portable POSIX liveness probe.
+    assert_eq!(
+        unsafe { libc::kill(pid as libc::pid_t, 0) },
+        0,
+        "daemon process should exist: {}",
+        std::io::Error::last_os_error()
     );
 
     // Stop daemon
@@ -1462,6 +1464,258 @@ fn test_mq_start_and_helper_commands() {
         .run()
         .unwrap();
     assert!(!result.status.success(), "pid should fail after stop");
+}
+
+/// A PID file is not sufficient authority to signal a process: the daemon
+/// socket must acknowledge shutdown with the same PID.
+#[test]
+fn test_mq_stop_does_not_signal_unrelated_pid() {
+    let repo = setup_git_base_repo("rebase");
+    let runtime_dir = repo.path().join(".untrusted-runtime");
+    fs::create_dir(&runtime_dir).unwrap();
+    fs::write(
+        runtime_dir.join(constants::MQ_DIR_FILENAME),
+        repo.path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+
+    let mut unrelated = Command::new("sleep").arg("10").spawn().unwrap();
+    fs::write(
+        runtime_dir.join(constants::MQ_PID_FILENAME),
+        unrelated.id().to_string(),
+    )
+    .unwrap();
+
+    let result = cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(unrelated.try_wait().unwrap().is_none());
+    assert!(
+        runtime_dir.exists(),
+        "failed stop must preserve runtime state"
+    );
+
+    unrelated.kill().unwrap();
+    unrelated.wait().unwrap();
+}
+
+#[test]
+fn test_mq_stop_pid_mismatch_does_not_stop_live_daemon() {
+    let repo = setup_git_base_repo("rebase");
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo.path())
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo.path(), 10);
+    let runtime_dir = cmd!(selfci_bin(), "mq", "runtime-dir")
+        .dir(repo.path())
+        .read()
+        .unwrap();
+    let pid_file = Path::new(runtime_dir.trim()).join(constants::MQ_PID_FILENAME);
+    let daemon_pid = fs::read_to_string(&pid_file).unwrap();
+    let mut unrelated = Command::new("sleep").arg("10").spawn().unwrap();
+    fs::write(&pid_file, unrelated.id().to_string()).unwrap();
+
+    let result = cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(unrelated.try_wait().unwrap().is_none());
+    cmd!(selfci_bin(), "mq", "list")
+        .dir(repo.path())
+        .run()
+        .expect("PID mismatch must not stop the real daemon");
+
+    fs::write(pid_file, daemon_pid).unwrap();
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .run()
+        .unwrap();
+    unrelated.kill().unwrap();
+    unrelated.wait().unwrap();
+}
+
+#[test]
+fn test_mq_stop_nonexistent_pid_preserves_live_daemon_state() {
+    let repo = setup_git_base_repo("rebase");
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo.path())
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo.path(), 10);
+    let runtime_dir = cmd!(selfci_bin(), "mq", "runtime-dir")
+        .dir(repo.path())
+        .read()
+        .unwrap();
+    let runtime_dir = PathBuf::from(runtime_dir.trim());
+    let pid_file = runtime_dir.join(constants::MQ_PID_FILENAME);
+    let daemon_pid = fs::read_to_string(&pid_file).unwrap();
+    fs::write(&pid_file, i32::MAX.to_string()).unwrap();
+
+    let result = cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(runtime_dir.exists());
+    cmd!(selfci_bin(), "mq", "list")
+        .dir(repo.path())
+        .run()
+        .expect("nonexistent mq.pid must not stop the real daemon");
+
+    fs::write(pid_file, daemon_pid).unwrap();
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .run()
+        .unwrap();
+}
+
+#[test]
+fn test_mq_stop_force_kills_after_grace_timeout() {
+    let repo = setup_git_base_repo("rebase");
+    let runtime_dir = repo.path().join(".forced-stop-runtime");
+    fs::create_dir(&runtime_dir).unwrap();
+    fs::write(
+        runtime_dir.join(constants::MQ_DIR_FILENAME),
+        repo.path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+    let mut target = Command::new("sleep").arg("10").spawn().unwrap();
+    let pid = target.id() as libc::pid_t;
+    fs::write(
+        runtime_dir.join(constants::MQ_PID_FILENAME),
+        pid.to_string(),
+    )
+    .unwrap();
+    let listener =
+        std::os::unix::net::UnixListener::bind(runtime_dir.join(constants::MQ_SOCK_FILENAME))
+            .unwrap();
+    let server = thread::spawn(move || {
+        for expected_request in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = mq_protocol::read_mq_request(&mut stream).unwrap();
+            let response = match (expected_request, request) {
+                (0, mq_protocol::MQRequest::Hello) => mq_protocol::MQResponse::HelloAck { pid },
+                (
+                    1,
+                    mq_protocol::MQRequest::Shutdown {
+                        expected_pid: requested_pid,
+                    },
+                ) if requested_pid == pid => mq_protocol::MQResponse::ShutdownAck { pid },
+                (_, request) => panic!("unexpected request: {request:?}"),
+            };
+            mq_protocol::write_mq_response(&mut stream, response).unwrap();
+        }
+    });
+
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .env("SELFCI_TEST_MQ_STOP_GRACE_MS", "10")
+        .env("SELFCI_TEST_MQ_STOP_KILL_MS", "1000")
+        .run()
+        .unwrap();
+    server.join().unwrap();
+    let status = target.wait().unwrap();
+    assert!(!status.success(), "target should have been force-killed");
+    assert!(!runtime_dir.exists());
+}
+
+#[test]
+fn test_mq_stale_auto_runtime_does_not_mask_restart() {
+    let repo = setup_git_base_repo("rebase");
+    let runtime_root = dirs::runtime_dir()
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/selfci-{}", nix::unistd::getuid())))
+        .join("selfci");
+    fs::create_dir_all(&runtime_root).unwrap();
+    let stale_dir = runtime_root.join(format!("000-stale-test-{}", std::process::id()));
+    fs::create_dir(&stale_dir).unwrap();
+    fs::write(
+        stale_dir.join(constants::MQ_DIR_FILENAME),
+        repo.path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        stale_dir.join(constants::MQ_PID_FILENAME),
+        i32::MAX.to_string(),
+    )
+    .unwrap();
+
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo.path())
+        .run()
+        .expect("stale state must not prevent automatic restart");
+    wait_for_daemon_ready(repo.path(), 10);
+    cmd!(selfci_bin(), "mq", "list")
+        .dir(repo.path())
+        .run()
+        .expect("stale state must not mask the later live daemon");
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .run()
+        .unwrap();
+
+    fs::remove_dir_all(stale_dir).unwrap();
+}
+
+#[test]
+fn test_mq_stop_cleans_dead_explicit_runtime_then_allows_restart() {
+    let repo = setup_git_base_repo("rebase");
+    let runtime_dir = repo.path().join(".stale-explicit-runtime");
+    fs::create_dir(&runtime_dir).unwrap();
+    fs::write(
+        runtime_dir.join(constants::MQ_DIR_FILENAME),
+        repo.path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        runtime_dir.join(constants::MQ_PID_FILENAME),
+        i32::MAX.to_string(),
+    )
+    .unwrap();
+
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .run()
+        .expect("dead recorded PID proves stale explicit state can be cleaned");
+    assert!(!runtime_dir.exists());
+
+    fs::create_dir(&runtime_dir).unwrap();
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo.path())
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .run()
+        .expect("pre-created empty explicit runtime should start");
+    wait_for_daemon_ready_with_env(repo.path(), &runtime_dir, 10);
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo.path())
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .run()
+        .unwrap();
 }
 
 /// Test that starting daemon when already running is idempotent

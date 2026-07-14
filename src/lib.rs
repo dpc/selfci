@@ -7,14 +7,17 @@ pub mod exit_codes;
 pub mod mq_protocol;
 pub mod protocol;
 pub mod revision;
+#[cfg(test)]
+#[path = "stale_bookmark_tests.rs"]
+mod tests;
 
 use duct::cmd;
 use std::path::Path;
 
 pub use config::{CloneMode, InitResult, SelfCIConfig, init_config, read_config};
 pub use error::{
-    CheckError, CommandOutputError, ConfigError, MQError, MainError, MergeError, VCSError,
-    VCSOperationError, WorkDirError,
+    CheckError, CommandOutputError, ConfigError, MQError, MainError, MergeError,
+    ProcessControlError, VCSError, VCSOperationError, WorkDirError,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -90,17 +93,14 @@ fn stale_selfci_export_bookmark(line: &str) -> Option<String> {
     let suffix = bookmark
         .strip_prefix("selfci-export-base-")
         .or_else(|| bookmark.strip_prefix("selfci-export-candidate-"))?;
-    let pid = suffix.split('-').next()?;
-    let proc_dir = Path::new("/proc");
-    if !proc_dir.is_dir() {
+    let pid = suffix.split('-').next()?.parse::<libc::pid_t>().ok()?;
+    if pid <= 0 {
         return None;
     }
-    let _: u32 = pid.parse().ok()?;
-    if proc_dir.join(pid).exists() {
-        return None;
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+        Err(nix::errno::Errno::ESRCH) => Some(bookmark.to_string()),
+        Ok(()) | Err(_) => None,
     }
-
-    Some(bookmark.to_string())
 }
 
 pub fn copy_revisions_to_workdirs(

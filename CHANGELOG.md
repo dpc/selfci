@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 * Jujutsu checks now require `jj` with `--no-integrate-operation` support.
+* Added native macOS support for merge-queue lifecycle observation and stale
+  cleanup, with the complete test suite in macOS CI.
 
 ### Fixed
 

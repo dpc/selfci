@@ -7,6 +7,11 @@ SelfCI is a minimalistic local-first Unix-philosophy-abiding CI.
 It is fully working for my use cases of defining and running CI checks locally.
 It still fresh though, details might change.
 
+SelfCI supports Linux (kernel 5.3 or newer, for `pidfd_open`) and macOS on Apple
+Silicon. Both platforms run the native build and test suite in CI. Intel macOS
+packages are exposed by the Nix flake but are not currently covered by a native
+CI runner.
+
 My favourite part is being able to run `selfci mq start <id>` and have the
 merge-queue daemon run the CI and merge the change into trunk without
 me having to baby-sit anything.
