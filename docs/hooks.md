@@ -74,6 +74,8 @@ Failure will fail the candidate check and prevent merge.
 
 Runs after a successful merge. Useful for automatically
 pushing updates to remotes (if non-interactive).
+Use `SELFCI_LANDED_COMMIT_ID` for the exact commit that was atomically
+published.
 
 Failure is logged but job status remains unchanged (already merged).
 
@@ -106,9 +108,23 @@ These hooks run after the test merge/rebase, so they also have access to the mer
 |----------|-------------|
 | `SELFCI_MERGED_COMMIT_ID` | Git/jj commit hash after test merge/rebase onto base |
 | `SELFCI_MERGED_CHANGE_ID` | Jujutsu change ID after test merge/rebase (same as commit ID for git) |
+| `SELFCI_TESTED_COMMIT_ID` | Exact prepared commit tested by CI |
+| `SELFCI_TESTED_CHANGE_ID` | Exact prepared change tested by CI |
 
 **Note:** `SELFCI_CANDIDATE_*` always refers to the original commit submitted by the user.
 `SELFCI_MERGED_*` refers to the test-merged commit that CI is actually testing.
+It remains a compatibility alias for `SELFCI_TESTED_*`.
+
+### post-merge Only
+
+| Variable | Description |
+|----------|-------------|
+| `SELFCI_LANDED_COMMIT_ID` | Verified commit actually published to the base |
+| `SELFCI_LANDED_CHANGE_ID` | Verified change actually published to the base |
+
+SelfCI publishes the exact tested integration, so tested and landed commit IDs
+normally match. The distinct landed variables are the safe interface for
+publication hooks.
 
 ### post-clone Only
 

@@ -52,16 +52,31 @@ For each run, the daemon:
 4. exports base and tested-candidate worktrees;
 5. runs the optional `post-clone` hook and the shared candidate check;
 6. finishes a validation-only run after a passing check;
-7. otherwise runs `pre-merge`, performs final integration of the original
-   candidate into the configured base, and runs `post-merge`.
+7. otherwise runs `pre-merge`, atomically publishes the exact checked
+   integration if the base still names the resolved commit, and runs
+   `post-merge`.
 
-The test integration and final integration are separate VCS operations. The
-final operation rereads the movable base branch or bookmark without checking
-that it still equals the commit used for the test integration and without an
-expected-old compare-and-swap update. Base movement can therefore make the
-landed result differ from the checked result, and a concurrent update can
-conflict with or be overwritten by landing. This is a current implementation
-limitation, not an established landing guarantee.
+Publication never reconstructs integration from a movable name. Git updates
+the base ref with its resolved commit as the expected old object. Jujutsu moves
+the named bookmark only from the intersection of that name and resolved commit.
+If the expected target no longer matches, the run fails and preserves the
+external update; a later queue run resolves, prepares, and checks the newer
+base. A submitted Jujutsu commit that is a strict ancestor of the resolved base
+tests that exact base and publication performs an expected-old no-op check; if
+the base moves before that check, the no-op is classified as not applied. The
+actual landed identity is verified before publication hooks run. If
+the expected-old movement applies but this verification cannot establish one
+unique target, the distinct `publication-unverified` failure reports that
+publication may already have applied, suppresses `post-merge`, and requires
+repository inspection rather than an automatic retry.
+This implements
+[DECISION-toctou-integrity](DECISION-toctou-integrity.md).
+
+Jujutsu rebase preparation computes the submitted suffix from exact commit
+reachability and performs duplication and rebase in chained isolated
+operations. If the checked base contains a different commit revision of a
+logical change in the submitted ancestry, preparation fails rather than
+silently substituting that mutable change-ID revision.
 
 A failed preparation, check, or pre-merge hook does not intentionally move the
 base. The user's checked-out Git branch or Jujutsu working-copy content is not
@@ -88,9 +103,9 @@ The six hook slots and their project/local precedence are defined by
 - `post-clone` runs after worktree export and before jobs; failure fails the
   run.
 - `pre-merge` runs only for a passing, landing-enabled run; failure prevents
-  final integration and fails the run.
-- `post-merge` runs only after successful final integration. Its failure is
-  reported but cannot undo integration, so the run remains passed.
+  publication and fails the run.
+- `post-merge` runs only after successful publication. Its failure is reported
+  but cannot undo publication, so the run remains passed.
 
 Hooks run with the original project root as their working directory.
 Candidate-stage hooks receive the submitted candidate identities and base
@@ -100,6 +115,9 @@ including the base path from which the job command is loaded afterward.
 Candidate-stage hook output is shown in run status but excluded from
 integration commit descriptions. `pre-start` uses inherited interactive I/O;
 captured `post-start` output goes to daemon stderr or its log.
+`post-merge` additionally receives the verified landed commit and change
+identities. The legacy `SELFCI_MERGED_*` variables remain aliases for the
+tested identities.
 
 Daemon startup snapshots merge-queue configuration as described by
 [SPEC-configuration](SPEC-configuration.md). The daemon and flow are part of

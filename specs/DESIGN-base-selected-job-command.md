@@ -14,8 +14,9 @@ that protection must select a distinct trusted base.
 
 The merge queue runs its live-root `post-clone` hook after exporting the base
 but before loading this configuration. That hook receives the writable base
-path and can modify the command that will be loaded. It is therefore part of
-the trusted operational boundary.
+path, but SelfCI attests the exported tree before loading the command. A
+persistent hook change to the base export fails the check rather than changing
+the command that governs it.
 
 Even without such mutation, loading the entry command from the base does not
 make all executed check logic base-controlled. The selected command can

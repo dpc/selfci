@@ -45,6 +45,8 @@ pub enum FailedReason {
     PreMerge,
     /// The merge operation failed
     Merge,
+    /// Publication applied but its final identity could not be verified
+    PublicationUnverified,
     /// Failed to resolve base branch
     BaseResolve,
 }
@@ -81,6 +83,7 @@ impl MQRunStatus {
                     FailedReason::Check => "check",
                     FailedReason::PreMerge => "pre-merge",
                     FailedReason::Merge => "final-merge",
+                    FailedReason::PublicationUnverified => "publication-unverified",
                     FailedReason::BaseResolve => "base-resolve",
                 };
                 format!("Failed: {}", reason_str)

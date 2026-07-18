@@ -37,6 +37,8 @@ Set when running job commands (see [jobs.md](jobs.md) for details):
 | `SELFCI_CANDIDATE_ID` | User-provided revision string |
 | `SELFCI_MERGED_COMMIT_ID` | Commit hash after test merge/rebase onto base |
 | `SELFCI_MERGED_CHANGE_ID` | Change ID after test merge/rebase |
+| `SELFCI_TESTED_COMMIT_ID` | Exact prepared commit tested by CI |
+| `SELFCI_TESTED_CHANGE_ID` | Exact prepared change tested by CI |
 
 ## Hook Variables
 
@@ -50,5 +52,9 @@ Set when running hooks (see [hooks.md](hooks.md) for details):
 | `SELFCI_MQ_BASE_BRANCH` | Base branch for the merge queue |
 | `SELFCI_MERGED_COMMIT_ID` | Commit hash after test merge/rebase |
 | `SELFCI_MERGED_CHANGE_ID` | Change ID after test merge/rebase |
+| `SELFCI_TESTED_COMMIT_ID` | Exact prepared commit tested by CI |
+| `SELFCI_TESTED_CHANGE_ID` | Exact prepared change tested by CI |
+| `SELFCI_LANDED_COMMIT_ID` | Verified commit published to the base (post-merge only) |
+| `SELFCI_LANDED_CHANGE_ID` | Verified change published to the base (post-merge only) |
 | `SELFCI_BASE_DIR` | Path to the base worktree (post-clone only) |
 | `SELFCI_CANDIDATE_DIR` | Path to the candidate worktree (post-clone only) |

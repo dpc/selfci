@@ -41,6 +41,31 @@ pub struct CheckResult {
     pub post_clone_success: Option<bool>,
 }
 
+/// Verify that a temporary Git checkout still materializes exactly the expected
+/// committed tree.
+///
+/// `git add --all` makes the comparison cover tracked changes and non-ignored
+/// untracked files while applying the checkout's configured clean filters.
+/// Ignored files remain available for normal build outputs.
+fn attest_worktree(
+    worktree: &Path,
+    expected_commit: &selfci::revision::CommitId,
+) -> Result<bool, MainError> {
+    cmd!("git", "add", "--all")
+        .dir(worktree)
+        .run()
+        .map_err(selfci::VCSOperationError::CommandFailed)?;
+    let actual_tree = cmd!("git", "write-tree")
+        .dir(worktree)
+        .read()
+        .map_err(selfci::VCSOperationError::CommandFailed)?;
+    let expected_tree = cmd!("git", "rev-parse", &format!("{}^{{tree}}", expected_commit))
+        .dir(worktree)
+        .read()
+        .map_err(selfci::VCSOperationError::CommandFailed)?;
+    Ok(actual_tree.trim() == expected_tree.trim())
+}
+
 /// Configuration for running a post-clone hook
 pub struct PostCloneHookConfig<'a> {
     /// The hook command configuration
@@ -102,10 +127,14 @@ fn run_post_clone_hook(
 
     // Add merged env vars if present (MQ mode only)
     if let Some(merged_commit_id) = hook_config.merged_commit_id {
-        command = command.env(envs::SELFCI_MERGED_COMMIT_ID, merged_commit_id);
+        command = command
+            .env(envs::SELFCI_MERGED_COMMIT_ID, merged_commit_id)
+            .env(envs::SELFCI_TESTED_COMMIT_ID, merged_commit_id);
     }
     if let Some(merged_change_id) = hook_config.merged_change_id {
-        command = command.env(envs::SELFCI_MERGED_CHANGE_ID, merged_change_id);
+        command = command
+            .env(envs::SELFCI_MERGED_CHANGE_ID, merged_change_id)
+            .env(envs::SELFCI_TESTED_CHANGE_ID, merged_change_id);
     }
 
     let result = command
@@ -195,9 +224,6 @@ impl SharedJobStates {
 /// If `post_clone_hook` is provided, it will be run after worktrees are created but before
 /// the job starts. The hook receives environment variables for the worktree paths.
 ///
-/// If `test_merge_cleanup` is provided, it is run as soon as worktree export succeeds and
-/// remains armed as a drop guard if setup fails before then.
-///
 /// The `original_candidate` parameter is used in MQ mode to distinguish between:
 /// - The original candidate (what the user submitted) -> SELFCI_CANDIDATE_* env vars
 /// - The working candidate (after test merge/rebase) -> SELFCI_MERGED_* env vars
@@ -208,7 +234,6 @@ pub fn run_candidate_check(
     root_dir: &Path,
     base_rev: &ResolvedRevision,
     candidate_rev: &ResolvedRevision,
-    mut test_merge_cleanup: Option<super::mq::JjTestChangeCleanup>,
     parallelism: usize,
     forced_vcs: Option<&str>,
     mode: CheckMode,
@@ -254,11 +279,6 @@ pub fn run_candidate_check(
         root_config.job.clone_mode,
     )?;
 
-    // The temporary jj changes are no longer needed once export has completed.
-    if let Some(cleanup) = test_merge_cleanup.as_mut() {
-        cleanup.cleanup();
-    }
-
     // Run post-clone hook if configured
     let (post_clone_output, post_clone_success) = if let Some(hook_config) = &post_clone_hook {
         debug!("Running post-clone hook");
@@ -277,6 +297,22 @@ pub fn run_candidate_check(
     if post_clone_success == Some(false) {
         return Ok(CheckResult {
             output: String::new(),
+            steps: Vec::new(),
+            jobs: Vec::new(),
+            exit_code: Some(1),
+            duration: Duration::ZERO,
+            post_clone_output,
+            post_clone_success,
+        });
+    }
+
+    // A hook may write both exported trees. Reject persistent source changes
+    // before allowing a job to observe them.
+    if !attest_worktree(base_workdir.path(), &base_rev.commit_id)?
+        || !attest_worktree(candidate_workdir.path(), &candidate_rev.commit_id)?
+    {
+        return Ok(CheckResult {
+            output: "Check failed: post-clone changed the exported source tree\n".to_string(),
             steps: Vec::new(),
             jobs: Vec::new(),
             exit_code: Some(1),
@@ -616,6 +652,15 @@ pub fn run_candidate_check(
         }
     }
 
+    // All jobs share both writable exports. Their exit status is meaningful for
+    // publication only if neither exported source tree was persistently changed.
+    let worktrees_match = attest_worktree(base_workdir.path(), &base_rev.commit_id)?
+        && attest_worktree(candidate_workdir.path(), &candidate_rev.commit_id)?;
+    if !worktrees_match {
+        any_job_failed = true;
+        output!("Check failed: a job changed an exported source tree");
+    }
+
     // Output final run summary
     let total_duration = check_start.elapsed();
     let run_emoji = if any_job_failed { "❌" } else { "✅" };
@@ -708,13 +753,12 @@ pub fn check(
     // Create test merge/rebase of candidate onto base for CI testing
     // This ensures we test what would actually be merged, just like MQ mode
     // Skip test merge if base and candidate are the same commit (nothing to merge)
-    let mut test_merge_cleanup = None;
     let merged_candidate = if resolved_base.commit_id == resolved_candidate.commit_id {
         debug!("Base and candidate are the same commit, skipping test merge");
         resolved_candidate.clone()
     } else {
         // Use the resolved base commit ID (works with both branch names and commit hashes)
-        let mut test_merge_result = super::mq::create_test_merge(
+        let test_merge_result = super::mq::create_test_merge(
             &root_dir,
             resolved_base.commit_id.as_str(),
             &resolved_candidate,
@@ -730,8 +774,6 @@ pub fn check(
             merged_change = %test_merge_result.change_id,
             "Created test merge"
         );
-        test_merge_cleanup = test_merge_result.cleanup.take();
-
         // Create a ResolvedRevision for the merged commit. Temporary jj changes
         // remain available until the workdir clone exports them to Git.
         selfci::revision::ResolvedRevision {
@@ -766,7 +808,6 @@ pub fn check(
         &root_dir,
         &resolved_base,
         &merged_candidate,
-        test_merge_cleanup,
         parallelism,
         forced_vcs,
         CheckMode::Inline { print_output },

@@ -123,10 +123,14 @@ pub fn job_worker(
 
         // Add merged env vars if present (MQ mode only)
         if let Some(ref merged_commit_id) = job.merged_commit_id {
-            command = command.env(envs::SELFCI_MERGED_COMMIT_ID, merged_commit_id);
+            command = command
+                .env(envs::SELFCI_MERGED_COMMIT_ID, merged_commit_id)
+                .env(envs::SELFCI_TESTED_COMMIT_ID, merged_commit_id);
         }
         if let Some(ref merged_change_id) = job.merged_change_id {
-            command = command.env(envs::SELFCI_MERGED_CHANGE_ID, merged_change_id);
+            command = command
+                .env(envs::SELFCI_MERGED_CHANGE_ID, merged_change_id)
+                .env(envs::SELFCI_TESTED_CHANGE_ID, merged_change_id);
         }
 
         let handle = match command.stderr_to_stdout().unchecked().reader() {

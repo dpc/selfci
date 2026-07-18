@@ -22,8 +22,11 @@ complete trust boundary.
 
 CI authors are responsible for protecting the host from candidate and hook
 code and for preventing concurrently running jobs from interfering through
-their shared worktree. This applies even when the entry command is selected
-from the base as described by
+their shared worktree. Persistent source-tree interference fails SelfCI's final
+attestation, but an adversarial command can still mutate and restore within its
+own lifetime as the explicit trusted-command exception in
+[DECISION-toctou-integrity](DECISION-toctou-integrity.md). This applies even
+when the entry command is selected from the base as described by
 [DESIGN-base-selected-job-command](DESIGN-base-selected-job-command.md).
 
 This decision constrains job execution in

@@ -33,6 +33,18 @@ pub const SELFCI_MERGED_COMMIT_ID: &str = "SELFCI_MERGED_COMMIT_ID";
 /// Merged change ID (MQ only: jj change ID after test merge/rebase, same as commit ID for git)
 pub const SELFCI_MERGED_CHANGE_ID: &str = "SELFCI_MERGED_CHANGE_ID";
 
+/// Commit ID of the prepared integration whose tree the check validated.
+pub const SELFCI_TESTED_COMMIT_ID: &str = "SELFCI_TESTED_COMMIT_ID";
+
+/// Change ID of the prepared integration whose tree the check validated.
+pub const SELFCI_TESTED_CHANGE_ID: &str = "SELFCI_TESTED_CHANGE_ID";
+
+/// Commit ID actually published to the merge-queue base.
+pub const SELFCI_LANDED_COMMIT_ID: &str = "SELFCI_LANDED_COMMIT_ID";
+
+/// Change ID actually published to the merge-queue base.
+pub const SELFCI_LANDED_CHANGE_ID: &str = "SELFCI_LANDED_CHANGE_ID";
+
 /// MQ base branch name
 pub const SELFCI_MQ_BASE_BRANCH: &str = "SELFCI_MQ_BASE_BRANCH";
 

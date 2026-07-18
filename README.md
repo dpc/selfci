@@ -203,7 +203,12 @@ and after reviewing submitted contributors, add
 them to the SelfCI's Merge Queue.
 
 The mq daemon will run the candidate check against the base branch
-and merge passing changes into the base branch. This allows conveniently merging changes
+and atomically publish the exact checked integration only if the base has not
+moved. A concurrent base update is preserved and makes that run fail safely.
+If publication may have applied but its landed identity cannot be verified,
+the run fails as `publication-unverified`: inspect the repository before taking
+action, and do not blindly retry the candidate.
+This allows conveniently merging changes
 without the need to babysit and wait for things to finish.
 
 `selfci mq wait [run_id]` blocks until the given run completes, exiting 0

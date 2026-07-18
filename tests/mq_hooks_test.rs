@@ -311,6 +311,69 @@ fn test_mq_hooks_execution() {
     );
 }
 
+/// A post-clone hook cannot replace the base-selected command before loading.
+#[test]
+#[traced_test]
+fn test_post_clone_base_config_mutation_fails_before_check() {
+    let repo = setup_git_repo_with_hooks();
+    let repo_path = repo.path();
+    let feature_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
+    let main_before = cmd!("git", "rev-parse", "main")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    fs::write(
+        repo_path.join(".config/selfci/ci.yaml"),
+        r#"job:
+  command: 'true'
+mq:
+  base-branch: main
+  merge-mode: merge
+  post-clone:
+    command: 'printf mutated > "$SELFCI_BASE_DIR/.config/selfci/ci.yaml"'
+"#,
+    )
+    .unwrap();
+
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+    let output = cmd!(selfci_bin(), "mq", "add", &feature_commit)
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    let run_id = output
+        .lines()
+        .find(|line| line.contains("run ID"))
+        .and_then(|line| line.split(':').next_back())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap();
+    let status = wait_for_job_completion_with_output(repo_path, run_id, 30).unwrap();
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    assert!(
+        status.contains("Status: Failed: check"),
+        "tracked mutation must fail the check: {status}"
+    );
+    assert!(
+        status.contains("post-clone changed the exported source tree"),
+        "failure should identify post-clone mutation: {status}"
+    );
+    assert_eq!(
+        cmd!("git", "rev-parse", "main")
+            .dir(repo_path)
+            .read()
+            .unwrap(),
+        main_before,
+        "failed mutation attestation must not publish"
+    );
+}
+
 #[test]
 #[traced_test]
 fn test_pre_clone_hook_failure() {
@@ -1065,6 +1128,21 @@ mq:
         pre_clone_vars.get("SELFCI_CANDIDATE_COMMIT_ID"),
         post_merge_vars.get("SELFCI_CANDIDATE_COMMIT_ID"),
         "pre-clone and post-merge should see the same SELFCI_CANDIDATE_COMMIT_ID"
+    );
+
+    let landed_commit = cmd!("git", "rev-parse", "main")
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    assert_eq!(
+        post_merge_vars.get("SELFCI_LANDED_COMMIT_ID"),
+        Some(&landed_commit),
+        "post-merge must receive the actual commit published to the base"
+    );
+    assert_eq!(
+        post_merge_vars.get("SELFCI_TESTED_COMMIT_ID"),
+        post_merge_vars.get("SELFCI_LANDED_COMMIT_ID"),
+        "SelfCI publishes the exact prepared integration it tested"
     );
 }
 

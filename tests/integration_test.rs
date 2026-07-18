@@ -894,3 +894,66 @@ job:
         "SELFCI_JOB_NAME should be 'main'"
     );
 }
+
+/// A green command cannot validate bytes that differ from the prepared commit.
+#[test]
+#[traced_test]
+fn test_check_rejects_job_mutation_of_candidate_tree() {
+    let repo = common::setup_git_repo();
+    let repo_path = repo.path();
+    cmd!("git", "reset", "--hard", "HEAD^")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    fs::write(
+        config_path(repo_path),
+        r#"
+job:
+  command: |
+    printf 'checked only after mutation' > candidate.txt
+    test "$(cat candidate.txt)" = "checked only after mutation"
+"#,
+    )
+    .unwrap();
+    cmd!("git", "add", &config_path_str())
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("git", "commit", "--amend", "--no-edit")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("candidate.txt"), "submitted content").unwrap();
+    cmd!("git", "add", "candidate.txt")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+    cmd!("git", "commit", "-m", "candidate")
+        .dir(repo_path)
+        .run()
+        .unwrap();
+
+    let output = cmd!(
+        env!("CARGO_BIN_EXE_selfci"),
+        "check",
+        "--root",
+        repo_path,
+        "--base",
+        "HEAD^",
+        "--candidate",
+        "HEAD",
+        "--print-output"
+    )
+    .env("SELFCI_VCS_FORCE", "git")
+    .stderr_to_stdout()
+    .stdout_capture()
+    .unchecked()
+    .run()
+    .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "mutated source must not pass");
+    assert!(
+        text.contains("changed an exported source tree"),
+        "failure should identify the source-tree mismatch: {text}"
+    );
+}

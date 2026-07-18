@@ -27,7 +27,21 @@ Two worktrees are created:
 - **Base worktree**: Contains the base commit (e.g., `main` branch)
 - **Candidate worktree**: Contains the **test-merged** candidate commit
 
-The job command runs in the candidate worktree directory. For Jujutsu repositories, SelfCI requires a `jj` version with `--no-integrate-operation` support. Synthetic changes are prepared in an isolated operation, tracked by their exact change IDs, made visible only for worktree export, and then removed. Setup failures also trigger cleanup; if cleanup itself fails, SelfCI warns that manual cleanup may be required.
+The job command runs in the candidate worktree directory. After `post-clone`
+and after all jobs finish, SelfCI verifies that the base and candidate exports
+still represent their prepared Git trees. Tracked changes and non-ignored
+untracked files fail the check even if the command exits successfully; ignored
+build outputs are allowed.
+
+For Jujutsu repositories, SelfCI requires a `jj` version with
+`--no-integrate-operation` support. Synthetic changes are prepared in an
+isolated operation and selected by exact submitted commit ancestry. A
+landing-enabled run publishes the exact prepared integration that passed.
+Other anonymous preparations are retained rather than risk rebasing another
+writer's descendants during eager cleanup.
+Current Jujutsu versions retain these anonymous visible heads even during
+garbage collection, so repeated checks can require manual inspection and
+abandonment when repository activity is quiescent.
 
 ## Environment Variables
 
@@ -55,6 +69,8 @@ When base and candidate differ (diverging history), additional environment varia
 |----------|-------------|
 | `SELFCI_MERGED_COMMIT_ID` | Git/jj commit hash after test merge/rebase onto base |
 | `SELFCI_MERGED_CHANGE_ID` | Jujutsu change ID after test merge/rebase (same as commit ID for git) |
+| `SELFCI_TESTED_COMMIT_ID` | Exact prepared commit tested by CI |
+| `SELFCI_TESTED_CHANGE_ID` | Exact prepared change tested by CI |
 
 **Note:** `SELFCI_CANDIDATE_*` always refers to the original commit submitted by the user.
 `SELFCI_MERGED_*` refers to the test-merged commit that CI is actually testing. This allows jobs to:
@@ -62,6 +78,8 @@ When base and candidate differ (diverging history), additional environment varia
 - Know what commit hash the test worktree actually contains
 
 When base and candidate are the same commit (no diverging history), `SELFCI_MERGED_*` is not set since no merge is needed.
+`SELFCI_MERGED_*` is retained as a compatibility alias for
+`SELFCI_TESTED_*`.
 
 The merge mode (rebase or merge) is controlled by the `mq.merge-mode` config option (defaults to `rebase`).
 

@@ -25,10 +25,25 @@ not move the base reference or alter the user's working copy.
 
 The check exports writable temporary worktrees at the resolved base and
 tested-candidate identities using the configured full, partial, or shallow
-clone mode. Temporary worktrees and export references, plus SelfCI-owned
-synthetic Jujutsu changes, are cleaned up on supported paths. Synthetic Git
-commits become unreachable and remain subject to normal Git garbage
-collection.
+clone mode. Temporary worktrees and export references are cleaned up.
+SelfCI-owned synthetic Jujutsu preparations remain as anonymous visible heads
+in repository storage unless a merge-queue landing publishes one. SelfCI does
+not eagerly abandon them because even abandoning an exact commit can rebase a
+concurrent descendant or delete a bookmark; preserving external work takes
+precedence over eager cleanup. Jujutsu does not currently garbage-collect these
+visible heads, so repeated checks accumulate them and repository owners may
+need to inspect and abandon obsolete SelfCI preparations manually when no
+concurrent work depends on them. Unreferenced synthetic Git commits remain
+subject to normal Git garbage collection.
+
+After `post-clone` and again after all jobs, SelfCI stages the exported Git
+worktrees and requires their resulting trees to equal the prepared base and
+candidate trees. Persistent tracked changes and non-ignored untracked files
+fail the check even when commands exit successfully. Ignored files are excluded
+so build outputs can use project-defined ignored paths. Clean filters define
+the canonical Git tree comparison. The trusted-command mutate-and-restore
+exception is documented in
+[DECISION-toctou-integrity](DECISION-toctou-integrity.md).
 
 ## Job execution
 
@@ -70,7 +85,7 @@ A command that cannot be started, exits unsuccessfully, or contains a
 non-ignored failed step makes that started job unsuccessful. The check
 aggregates worker and step output and fails if a started job is unsuccessful.
 Inline checks can stream output; merge-queue checks capture it for run status
-and, in merge mode, possible inclusion in the integration commit description.
+and diagnostics.
 
 Revision resolution, test integration, configuration loading, worktree
 export, and worker-control failures also fail the check. Results and worktrees

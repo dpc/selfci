@@ -14,7 +14,7 @@ disposable worktrees, and runs project-supplied commands on the user's host.
   [SPEC-configuration](SPEC-configuration.md).
 - The revision and VCS layer resolves user expressions to stable change and
   commit identities, exports exact revisions into Git worktrees, and performs
-  Git- or Jujutsu-specific test integration and final integration.
+  Git- or Jujutsu-specific prepared integration and atomic publication.
 - The candidate-check coordinator prepares base and tested-candidate
   worktrees, starts workers, and aggregates command and step results as
   described by [SPEC-candidate-check](SPEC-candidate-check.md).
@@ -24,7 +24,7 @@ disposable worktrees, and runs project-supplied commands on the user's host.
 - The merge-queue client and project-local daemon communicate over another
   Unix-domain socket. The daemon serializes candidate runs, invokes the shared
   candidate-check coordinator, runs configured hooks, and optionally performs
-  final integration as described by
+  publication as described by
   [SPEC-merge-queue](SPEC-merge-queue.md).
 
 The merge queue depends on the candidate-check path rather than implementing a
@@ -41,11 +41,11 @@ tested candidate worktree. The boundary and its limits are recorded in
 
 For a queued run, the daemon freezes the submitted candidate identity at
 enqueue time and resolves the current base when processing begins. It prepares
-and checks a disposable integration result. A landing-enabled run that passes
-then performs a separate final integration of the original candidate into the
-configured base. The final operation does not verify that the mutable base
-still names the commit used to prepare the checked result. Candidates are
-processed one at a time, while jobs within one check may run concurrently.
+and checks one exact integration result. A landing-enabled run that passes
+moves the configured base from the resolved base commit to that exact prepared
+result with an atomic expected-old update. Base movement fails publication
+without overwriting the external update. Candidates are processed one at a
+time, while jobs within one check may run concurrently.
 
 ## Ownership and boundaries
 
@@ -56,9 +56,10 @@ persist run history or run IDs across daemon restarts; this describes its
 present storage boundary rather than establishing a durability policy.
 
 User expressions are resolved before snapshot operations. Immutable commit
-identities select exported content; Jujutsu change identities additionally
-track revisions across rewriting operations. Test integration must not move
-the configured base or modify the user's working copy.
+identities select exported content and candidate ancestry; a later Jujutsu
+revision with the same change ID cannot supersede a submitted commit. Prepared
+integration must not move the configured base or modify the user's working
+copy. Publication follows [DECISION-toctou-integrity](DECISION-toctou-integrity.md).
 
 SelfCI supplies disposable worktrees and bounded concurrency, but it does not
 sandbox commands or isolate jobs from one another. Candidate commands and

@@ -3,6 +3,7 @@ mod common;
 use duct::cmd;
 use selfci::{constants, mq_protocol};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
@@ -697,6 +698,116 @@ fn run_jj_candidate(repo_path: &Path, test_home: &Path, candidate: &str, no_merg
         .unwrap();
 }
 
+fn run_jj_candidate_expect_failure(repo_path: &Path, test_home: &Path, candidate: &str) {
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+    let output = cmd!(selfci_bin(), "mq", "add", candidate)
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .read()
+        .unwrap();
+    let run_id = extract_run_id(&output);
+    assert!(
+        !wait_for_run_completion(repo_path, run_id, 30),
+        "superseded exact candidate ancestry must fail safely"
+    );
+    let status = cmd!(selfci_bin(), "mq", "status", run_id.to_string())
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    assert!(
+        status.contains("different revision of submitted change"),
+        "failure should identify Jujutsu supersession: {status}"
+    );
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .run()
+        .unwrap();
+}
+
+fn create_jj_strict_ancestor(
+    repo_path: &Path,
+    test_home: &Path,
+    base_job_command: Option<&str>,
+) -> (String, String) {
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("candidate.txt"), "already integrated").unwrap();
+    cmd!("jj", "file", "track", "candidate.txt")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "Submitted ancestor")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .run()
+        .unwrap();
+    let candidate = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .read()
+        .unwrap();
+
+    cmd!("jj", "new")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("base-descendant.txt"), "newer base").unwrap();
+    cmd!("jj", "file", "track", "base-descendant.txt")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .run()
+        .unwrap();
+    if let Some(command) = base_job_command {
+        fs::write(
+            repo_path.join(".config/selfci/ci.yaml"),
+            format!(
+                "job:\n  command: '{command}'\n\
+                 mq:\n  base-branch: main\n  merge-mode: rebase\n"
+            ),
+        )
+        .unwrap();
+    }
+    cmd!("jj", "describe", "-m", "Checked base descendant")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "bookmark", "set", "main", "-r", "@")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .run()
+        .unwrap();
+    let base = cmd!("jj", "log", "-r", "main", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .read()
+        .unwrap();
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", test_home)
+        .run()
+        .unwrap();
+
+    (candidate.trim().to_owned(), base.trim().to_owned())
+}
+
 fn run_jj_rebase_prefix_immutable_test(with_intermediate_immutable_commit: bool) {
     let (repo, test_home) = setup_jj_base_repo("rebase");
     let repo_path = repo.path();
@@ -798,6 +909,30 @@ fn run_jj_rebase_prefix_immutable_test(with_intermediate_immutable_commit: bool)
             .to_string()
     };
 
+    if with_intermediate_immutable_commit {
+        cmd!("jj", "new", "main")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        fs::write(repo_path.join("sideways.txt"), "sideways base").unwrap();
+        cmd!("jj", "file", "track", "sideways.txt")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!("jj", "describe", "-m", "Sideways base")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+        cmd!("jj", "bookmark", "set", "main", "-r", "@")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .unwrap();
+    }
+
     fs::write(repo_path.join("working.txt"), "working on something else").unwrap();
 
     cmd!(selfci_bin(), "mq", "start")
@@ -844,7 +979,24 @@ fn run_jj_rebase_prefix_immutable_test(with_intermediate_immutable_commit: bool)
         .unwrap()
         .trim()
         .to_string();
-    assert_eq!(main_commit, candidate);
+    if with_intermediate_immutable_commit {
+        for path in ["prefix.txt", "candidate.txt", "sideways.txt"] {
+            assert!(
+                cmd!("jj", "file", "show", "-r", "main", path)
+                    .dir(repo_path)
+                    .env("HOME", &test_home)
+                    .run()
+                    .is_ok(),
+                "divergent rebase must retain immutable prefix, candidate, and base: {path}"
+            );
+        }
+        assert_ne!(
+            main_commit, candidate,
+            "divergent candidate should publish its exact prepared rebase"
+        );
+    } else {
+        assert_eq!(main_commit, candidate);
+    }
     verify_working_dir_unchanged_jj(repo_path);
 }
 
@@ -965,7 +1117,132 @@ fn test_jj_rebase_precheck_checks_full_unique_stack() {
 
 #[test]
 #[traced_test]
-fn test_jj_rebase_merge_skips_landed_divergent_ancestor() {
+fn test_jj_rebase_strict_ancestor_publishes_checked_base_noop() {
+    let (repo, test_home) = setup_jj_base_repo("rebase");
+    let repo_path = repo.path();
+    let (candidate, checked_base) = create_jj_strict_ancestor(repo_path, &test_home, None);
+
+    run_jj_candidate(repo_path, &test_home, &candidate, false);
+
+    let landed = cmd!("jj", "log", "-r", "main", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+    assert_eq!(
+        landed.trim(),
+        checked_base,
+        "an already-integrated strict ancestor must publish as an exact-base no-op"
+    );
+}
+
+#[test]
+#[traced_test]
+fn test_jj_rebase_strict_ancestor_raced_noop_is_not_applied() {
+    let (repo, test_home) = setup_jj_base_repo("rebase");
+    let repo_path = repo.path();
+    let started = repo_path.join("strict-ancestor-started");
+    let release = repo_path.join("strict-ancestor-release");
+    let command = format!(
+        "touch {}; while [ ! -f {} ]; do sleep 0.05; done",
+        started.display(),
+        release.display()
+    );
+    let (candidate, _) = create_jj_strict_ancestor(repo_path, &test_home, Some(&command));
+
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .env("JJ_USER", "Test User")
+        .env("JJ_EMAIL", "test@example.com")
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+    let output = cmd!(selfci_bin(), "mq", "add", &candidate)
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+    let run_id = extract_run_id(&output);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !started.exists() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        started.exists(),
+        "candidate job did not reach the race barrier"
+    );
+
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("external-race.txt"), "external").unwrap();
+    cmd!("jj", "file", "track", "external-race.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "External raced base")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "bookmark", "set", "main", "-r", "@")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    let external_change = cmd!("jj", "log", "-r", "main", "--no-graph", "-T", "change_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+    fs::write(&release, "").unwrap();
+
+    assert!(
+        !wait_for_run_completion(repo_path, run_id, 30),
+        "raced exact-base no-op must fail"
+    );
+    let status = cmd!(selfci_bin(), "mq", "status", run_id.to_string())
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    assert!(
+        status.contains("Status: Failed") && !status.contains("publication-unverified"),
+        "raced no-op is an ordinary not-applied failure: {status}"
+    );
+    let actual_change = cmd!("jj", "log", "-r", "main", "--no-graph", "-T", "change_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+    assert_eq!(
+        actual_change.trim(),
+        external_change.trim(),
+        "operation integration may rewrite the external commit but must preserve its change"
+    );
+    assert!(
+        cmd!("jj", "file", "show", "-r", "main", "external-race.txt")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .is_ok(),
+        "raced no-op must preserve the external base content"
+    );
+
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+}
+
+#[test]
+#[traced_test]
+fn test_jj_rebase_rejects_landed_divergent_ancestor() {
     let (repo, test_home) = setup_jj_base_repo("rebase");
     let repo_path = repo.path();
 
@@ -1047,20 +1324,22 @@ fn test_jj_rebase_merge_skips_landed_divergent_ancestor() {
         .run()
         .unwrap();
 
-    run_jj_candidate(repo_path, &test_home, &candidate, false);
+    run_jj_candidate_expect_failure(repo_path, &test_home, &candidate);
 
     let ancestor = cmd!("jj", "file", "show", "-r", "main", "ancestor.txt")
         .dir(repo_path)
         .env("HOME", &test_home)
         .read()
         .unwrap();
-    let child = cmd!("jj", "file", "show", "-r", "main", "candidate.txt")
-        .dir(repo_path)
-        .env("HOME", &test_home)
-        .read()
-        .unwrap();
     assert_eq!(ancestor, "landed ancestor");
-    assert_eq!(child, "candidate child");
+    assert!(
+        cmd!("jj", "file", "show", "-r", "main", "candidate.txt")
+            .dir(repo_path)
+            .env("HOME", &test_home)
+            .run()
+            .is_err(),
+        "failed superseded candidate must not be published"
+    );
 }
 
 // ============================================================================
@@ -1077,6 +1356,122 @@ fn test_jj_merge_merge_single() {
 #[traced_test]
 fn test_jj_merge_merge_multi() {
     run_jj_merge_test("merge", 5);
+}
+
+/// A bookmark move followed by an unverifiable target has a distinct terminal state.
+#[test]
+#[traced_test]
+fn test_jj_publication_applied_but_unverified_status() {
+    let (repo, test_home) = setup_jj_base_repo("merge");
+    let repo_path = repo.path();
+    let candidate = create_jj_candidate(repo_path, &test_home, 1);
+
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    fs::write(repo_path.join("external.txt"), "external").unwrap();
+    cmd!("jj", "file", "track", "external.txt")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    cmd!("jj", "describe", "-m", "External movement")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+    let external = cmd!("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .unwrap();
+    cmd!("jj", "new", "main")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
+
+    let post_merge_marker = repo_path.join("post-merge-ran");
+    fs::write(
+        repo_path.join(".config/selfci/local.yaml"),
+        format!(
+            "mq:\n  post-merge:\n    command: 'touch {}'\n",
+            post_merge_marker.display()
+        ),
+    )
+    .unwrap();
+
+    let real_jj = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("jj"))
+        .find(|path| path.is_file())
+        .expect("jj must be available on PATH");
+    let real_jj = real_jj.display();
+    let wrapper_dir = tempfile::tempdir().unwrap();
+    let wrapper = wrapper_dir.path().join("jj");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+"{real_jj}" "$@"
+status=$?
+case " $* " in
+  *" bookmark move "*)
+    if [ "$status" -eq 0 ]; then
+      "{real_jj}" --ignore-working-copy bookmark set --allow-backwards main -r "$SELFCI_TEST_EXTERNAL"
+    fi
+    ;;
+esac
+exit "$status"
+"#
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        wrapper_dir.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .env("PATH", &path)
+        .env("SELFCI_TEST_EXTERNAL", external.trim())
+        .run()
+        .unwrap();
+    wait_for_daemon_ready(repo_path, 10);
+    let output = cmd!(selfci_bin(), "mq", "add", &candidate)
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    let run_id = extract_run_id(&output);
+    assert!(!wait_for_run_completion(repo_path, run_id, 30));
+    let status = cmd!(selfci_bin(), "mq", "status", run_id.to_string())
+        .dir(repo_path)
+        .read()
+        .unwrap();
+    assert!(
+        status.contains("Failed: publication-unverified"),
+        "unexpected status: {status}"
+    );
+    assert!(!post_merge_marker.exists(), "post-merge must be suppressed");
+    let wait = cmd!(selfci_bin(), "mq", "wait", run_id.to_string())
+        .dir(repo_path)
+        .unchecked()
+        .run()
+        .unwrap();
+    assert!(
+        !wait.status.success(),
+        "mq wait must fail for applied-but-unverified publication"
+    );
+    cmd!(selfci_bin(), "mq", "stop")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .run()
+        .unwrap();
 }
 
 // ============================================================================

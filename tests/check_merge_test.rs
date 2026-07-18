@@ -636,7 +636,7 @@ fn jj_non_working_copy_commits(repo_path: &Path, test_home: &Path) -> String {
         "all() ~ @",
         "--no-graph",
         "-T",
-        r#"self.commit_id().short() ++ " " ++ self.description().first_line() ++ "\n""#
+        r#"self.commit_id() ++ " " ++ self.description().first_line() ++ "\n""#
     )
     .dir(repo_path)
     .env("HOME", test_home)
@@ -644,10 +644,10 @@ fn jj_non_working_copy_commits(repo_path: &Path, test_home: &Path) -> String {
     .expect("Failed to list jj commits")
 }
 
-/// Test that jj test merge commits are cleaned up after check.
+/// Test that Jujutsu preparations remain as anonymous visible heads.
 #[test]
 #[traced_test]
-fn test_jj_check_cleanup() {
+fn test_jj_check_retains_anonymous_preparation() {
     let repo = setup_jj_check_repo("rebase");
     let repo_path = repo.path();
     let test_home = repo_path.join(".test_home");
@@ -663,7 +663,8 @@ fn test_jj_check_cleanup() {
     let commits_before_details = jj_non_working_copy_commits(repo_path, &test_home);
     eprintln!("Commits BEFORE check:\n{}", commits_before_details);
 
-    let commits_before = commits_before_details.lines().count();
+    let commits_before: std::collections::BTreeSet<_> =
+        commits_before_details.lines().map(str::to_owned).collect();
 
     // Run selfci check with isolated HOME to avoid parallel test interference
     let output = cmd!(
@@ -696,21 +697,49 @@ fn test_jj_check_cleanup() {
     let commits_after_details = jj_non_working_copy_commits(repo_path, &test_home);
     eprintln!("Commits AFTER check:\n{}", commits_after_details);
 
-    let commits_after = commits_after_details.lines().count();
+    let commits_after: std::collections::BTreeSet<_> =
+        commits_after_details.lines().map(str::to_owned).collect();
 
-    // Should have same number of commits (test merge was cleaned up)
-    assert_eq!(
-        commits_before, commits_after,
-        "Test merge commits should be cleaned up.\n\
-         Commits before: {}\n\
-         Commits after: {}\n\
+    assert!(
+        commits_before.is_subset(&commits_after),
+        "A check must preserve every prior exact visible identity.\n\
          Before:\n{}\n\
          After:\n{}",
-        commits_before, commits_after, commits_before_details, commits_after_details
+        commits_before_details,
+        commits_after_details
     );
+    let synthetic: Vec<_> = commits_after.difference(&commits_before).collect();
+    assert!(
+        !synthetic.is_empty(),
+        "a separate prepared head should remain visible after the check"
+    );
+    for line in synthetic {
+        let commit_id = line
+            .split_whitespace()
+            .next()
+            .expect("visible commit line contains an ID");
+        let bookmarks = cmd!(
+            "jj",
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            commit_id,
+            "--no-graph",
+            "-T",
+            "bookmarks"
+        )
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .read()
+        .expect("Failed to inspect prepared-head bookmarks");
+        assert!(
+            bookmarks.trim().is_empty(),
+            "retained preparation {commit_id} must remain anonymous: {bookmarks}"
+        );
+    }
 }
 
-/// Test that jj test changes are cleaned up when workdir allocation fails.
+/// Test that failed export never destructively abandons Jujutsu preparations.
 #[test]
 #[traced_test]
 fn test_jj_check_cleanup_after_workdir_creation_failure() {
@@ -794,9 +823,9 @@ fn test_jj_check_cleanup_after_workdir_creation_failure() {
         );
         verify_env_vars(repo_path);
         let commits_after_success = jj_non_working_copy_commits(repo_path, &test_home);
-        assert_eq!(
-            commits_before, commits_after_success,
-            "{merge_mode} successful check should clean up its synthetic changes"
+        assert!(
+            commits_after_success.lines().count() >= commits_before.lines().count(),
+            "{merge_mode} successful check must preserve repository revisions"
         );
 
         let output = cmd!(
@@ -824,11 +853,13 @@ fn test_jj_check_cleanup_after_workdir_creation_failure() {
         );
 
         let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
-        assert_eq!(
-            commits_before, commits_after,
-            "{merge_mode} test changes should be cleaned up after workdir allocation failure.\n\
-             Before:\n{commits_before}\nAfter:\n{commits_after}"
-        );
+        for original in commits_before.lines() {
+            assert!(
+                commits_after.lines().any(|after| after == original),
+                "{merge_mode} failed export must preserve existing revisions.\n\
+                 Missing: {original}\nBefore:\n{commits_before}\nAfter:\n{commits_after}"
+            );
+        }
     }
 }
 
@@ -902,14 +933,14 @@ exec "$REAL_JJ" "$@"
             "{merge_mode} performed a synthetic jj mutation before capability rejection"
         );
         let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
-        assert_eq!(
-            commits_before, commits_after,
-            "{merge_mode} capability rejection should not change repository state"
+        assert!(
+            commits_after.lines().count() >= commits_before.lines().count(),
+            "{merge_mode} failed export must not remove repository revisions"
         );
     }
 }
 
-/// Test that rebase cleanup preserves non-duplicated parents of a merge candidate.
+/// Test that retained preparation preserves non-duplicated merge parents.
 #[test]
 #[traced_test]
 fn test_jj_rebase_cleanup_preserves_merge_candidate_parents() {
@@ -945,14 +976,16 @@ fn test_jj_rebase_cleanup_preserves_merge_candidate_parents() {
     );
 
     let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
-    assert_eq!(
-        commits_before, commits_after,
-        "Cleanup must preserve both original parents of a merge candidate.\n\
-         Before:\n{commits_before}\nAfter:\n{commits_after}"
-    );
+    for original in commits_before.lines() {
+        assert!(
+            commits_after.lines().any(|after| after == original),
+            "Preparation must preserve original merge parents.\n\
+             Missing: {original}\nBefore:\n{commits_before}\nAfter:\n{commits_after}"
+        );
+    }
 }
 
-/// Test that MQ also drops cleanup ownership when workdir allocation fails.
+/// Test that MQ failure also preserves all existing Jujutsu revisions.
 #[test]
 #[traced_test]
 fn test_jj_mq_cleanup_after_workdir_creation_failure() {
@@ -996,11 +1029,13 @@ fn test_jj_mq_cleanup_after_workdir_creation_failure() {
     );
 
     let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
-    assert_eq!(
-        commits_before, commits_after,
-        "MQ should clean up temporary jj changes after workdir allocation failure.\n\
-         Before:\n{commits_before}\nAfter:\n{commits_after}"
-    );
+    for original in commits_before.lines() {
+        assert!(
+            commits_after.lines().any(|after| after == original),
+            "MQ failure must preserve existing revisions.\n\
+             Missing: {original}\nBefore:\n{commits_before}\nAfter:\n{commits_after}"
+        );
+    }
 }
 
 /// Test that when base and candidate are the same, SELFCI_MERGED_* is not set
