@@ -16,6 +16,8 @@ pub struct RunJobRequest {
     pub job_full_command: Vec<String>,
     pub print_output: bool,
     pub socket_path: PathBuf,
+    /// Invocation mode (`check` or `mq`)
+    pub run_mode: &'static str,
     /// Candidate commit ID (original user-submitted commit hash)
     pub candidate_commit_id: String,
     /// Candidate change ID (original jj change ID, may be empty for git)
@@ -119,6 +121,7 @@ pub fn job_worker(
             .env(envs::SELFCI_CANDIDATE_CHANGE_ID, &job.candidate_change_id)
             .env(envs::SELFCI_CANDIDATE_ID, &job.candidate_id)
             .env(envs::SELFCI_JOB_NAME, &job.job_name)
+            .env(envs::SELFCI_RUN_MODE, job.run_mode)
             .env(envs::SELFCI_JOB_SOCK_PATH, &job.socket_path);
 
         // Add merged env vars if present (MQ mode only)
@@ -195,6 +198,8 @@ pub struct JobSpawnContext {
     pub command: String,
     pub print_output: bool,
     pub socket_path: PathBuf,
+    /// Invocation mode (`check` or `mq`)
+    pub run_mode: &'static str,
     /// Candidate commit ID (original user-submitted commit hash)
     pub candidate_commit_id: String,
     /// Candidate change ID (original jj change ID, may be empty for git)
@@ -282,6 +287,7 @@ pub fn control_socket_listener(
                                         job_full_command: full_command,
                                         print_output: spawn_context_clone.print_output,
                                         socket_path: spawn_context_clone.socket_path.clone(),
+                                        run_mode: spawn_context_clone.run_mode,
                                         candidate_commit_id: spawn_context_clone
                                             .candidate_commit_id
                                             .clone(),

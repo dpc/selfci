@@ -788,6 +788,7 @@ job:
     echo "BASE_DIR=$SELFCI_BASE_DIR"
     echo "CANDIDATE_DIR=$SELFCI_CANDIDATE_DIR"
     echo "JOB_NAME=$SELFCI_JOB_NAME"
+    echo "RUN_MODE=$SELFCI_RUN_MODE"
 "#;
 
     fs::write(config_path(repo_path), config_content).expect("Failed to write config");
@@ -892,6 +893,10 @@ job:
     assert!(
         output.contains("JOB_NAME=main"),
         "SELFCI_JOB_NAME should be 'main'"
+    );
+    assert!(
+        output.contains("RUN_MODE=check"),
+        "SELFCI_RUN_MODE should be 'check'"
     );
 }
 

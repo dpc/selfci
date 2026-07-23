@@ -164,7 +164,7 @@ fn setup_git_base_repo(merge_mode: &str) -> tempfile::TempDir {
         repo_path.join(".config/selfci/ci.yaml"),
         format!(
             r#"job:
-  command: 'true'
+  command: 'test "$SELFCI_RUN_MODE" = mq'
 mq:
   base-branch: main
   merge-mode: {merge_mode}

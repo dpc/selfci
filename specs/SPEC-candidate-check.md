@@ -74,7 +74,8 @@ semantics of those cases remain unresolved.
 
 The environment distinguishes the originally submitted candidate from the
 tested integration result. It exposes original candidate user/change/commit
-identities, base and candidate worktree paths, job name, and control socket.
+identities, base and candidate worktree paths, job name, control socket, and
+whether the check was invoked inline or by the merge queue.
 When a separate integration result was prepared, it also exposes that tested
 result's change and commit identities. `docs/environment.md` is the
 user-facing variable reference.

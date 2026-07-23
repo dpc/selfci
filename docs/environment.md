@@ -29,6 +29,7 @@ Set when running job commands (see [jobs.md](jobs.md) for details):
 | Variable | Description |
 |----------|-------------|
 | `SELFCI_JOB_NAME` | Name of the current job |
+| `SELFCI_RUN_MODE` | Invocation mode: `check` for an inline check or `mq` for a merge-queue run |
 | `SELFCI_JOB_SOCK_PATH` | Path to the job control socket |
 | `SELFCI_BASE_DIR` | Path to the base worktree |
 | `SELFCI_CANDIDATE_DIR` | Path to the candidate worktree |
@@ -46,6 +47,7 @@ Set when running hooks (see [hooks.md](hooks.md) for details):
 
 | Variable | Description |
 |----------|-------------|
+| `SELFCI_RUN_MODE` | Invocation mode; currently `mq`, because hooks run only as part of merge-queue operation |
 | `SELFCI_CANDIDATE_COMMIT_ID` | Git/jj commit hash of the original candidate |
 | `SELFCI_CANDIDATE_CHANGE_ID` | Jujutsu change ID of the original candidate |
 | `SELFCI_CANDIDATE_ID` | User-provided revision string |

@@ -91,6 +91,13 @@ impl CheckMode {
             CheckMode::MergeQueue => false,
         }
     }
+
+    fn env_value(&self) -> &'static str {
+        match self {
+            CheckMode::Inline { .. } => "check",
+            CheckMode::MergeQueue => "mq",
+        }
+    }
 }
 
 /// Run the post-clone hook with environment variables set
@@ -112,6 +119,7 @@ fn run_post_clone_hook(
 
     let mut command = cmd(&full_command[0], &full_command[1..])
         .dir(root_dir)
+        .env(envs::SELFCI_RUN_MODE, "mq")
         .env(envs::SELFCI_BASE_DIR, base_dir)
         .env(envs::SELFCI_CANDIDATE_DIR, candidate_dir)
         .env(
@@ -388,6 +396,7 @@ pub fn run_candidate_check(
         command: config.job.command.clone(),
         print_output: mode.print_output(),
         socket_path: socket_path.clone(),
+        run_mode: mode.env_value(),
         candidate_commit_id: candidate_info.commit_id.to_string(),
         candidate_change_id: candidate_info.change_id.to_string(),
         candidate_id: candidate_info.user.to_string(),
@@ -422,6 +431,7 @@ pub fn run_candidate_check(
             job_full_command: full_command,
             print_output: mode.print_output(),
             socket_path: socket_path.clone(),
+            run_mode: mode.env_value(),
             candidate_commit_id: candidate_info.commit_id.to_string(),
             candidate_change_id: candidate_info.change_id.to_string(),
             candidate_id: candidate_info.user.to_string(),

@@ -97,7 +97,7 @@ mq:
   base-branch: main
   merge-mode: merge
   pre-clone:
-    command: 'echo "pre-clone from ci.yaml" && touch pre_clone_executed.txt'
+    command: 'test "$SELFCI_RUN_MODE" = mq && echo "pre-clone from ci.yaml" && touch pre_clone_executed.txt'
   post-merge:
     command: 'echo "post-merge from ci.yaml - should be overridden" && touch post_merge_ci.txt'
 "#,
@@ -109,9 +109,9 @@ mq:
         repo_path.join(".config/selfci/local.yaml"),
         r#"mq:
   pre-merge:
-    command: 'echo "pre-merge from local.yaml" && touch pre_merge_executed.txt'
+    command: 'test "$SELFCI_RUN_MODE" = mq && echo "pre-merge from local.yaml" && touch pre_merge_executed.txt'
   post-merge:
-    command: 'echo "post-merge from local.yaml" && touch post_merge_local.txt'
+    command: 'test "$SELFCI_RUN_MODE" = mq && echo "post-merge from local.yaml" && touch post_merge_local.txt'
 "#,
     )
     .unwrap();

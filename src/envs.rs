@@ -9,6 +9,9 @@ pub const SELFCI_LOG_FULL: &str = "SELFCI_LOG_FULL";
 /// Job name (set by selfci when running job commands)
 pub const SELFCI_JOB_NAME: &str = "SELFCI_JOB_NAME";
 
+/// Run mode (`check` for inline checks or `mq` for merge-queue runs)
+pub const SELFCI_RUN_MODE: &str = "SELFCI_RUN_MODE";
+
 /// Path to the job control socket (set by selfci when running job commands)
 pub const SELFCI_JOB_SOCK_PATH: &str = "SELFCI_JOB_SOCK_PATH";
 

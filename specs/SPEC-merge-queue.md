@@ -108,6 +108,7 @@ The six hook slots and their project/local precedence are defined by
   but cannot undo publication, so the run remains passed.
 
 Hooks run with the original project root as their working directory.
+Their environment identifies the run as a merge-queue operation.
 Candidate-stage hooks receive the submitted candidate identities and base
 branch. Hooks after test integration receive its tested identities, and
 `post-clone` additionally receives writable temporary worktree paths,

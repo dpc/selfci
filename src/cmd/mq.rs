@@ -1076,7 +1076,7 @@ fn run_hook_with_env(
 
     // Build command with optional candidate environment variables
     let mut command = cmd(&full_command[0], &full_command[1..]);
-    command = command.dir(root_dir);
+    command = command.dir(root_dir).env(envs::SELFCI_RUN_MODE, "mq");
 
     if let Some(env) = candidate_env {
         command = command
