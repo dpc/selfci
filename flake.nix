@@ -106,6 +106,7 @@
 
                 tests = craneLib.cargoNextest {
                   cargoArtifacts = workspace;
+                  doInstallCargoArtifacts = false;
                   nativeBuildInputs = with pkgs; [
                     git
                     unstablePkgs.jujutsu
@@ -119,6 +120,7 @@
                   # must be deps, otherwise it will not rebuild
                   # anything and thus not detect anything
                   cargoArtifacts = workspaceDeps;
+                  doInstallCargoArtifacts = false;
                   cargoClippyExtraArgs = "--all-targets -- -D warnings";
                 };
               }
