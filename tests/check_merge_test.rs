@@ -851,6 +851,16 @@ fn test_jj_check_cleanup_after_workdir_creation_failure() {
             output.contains("Failed to create work directory"),
             "{merge_mode} check should fail while allocating a workdir.\nOutput:\n{output}"
         );
+        assert!(
+            output.contains(&missing_tmpdir.display().to_string()),
+            "{merge_mode} failure should report the attempted workdir location.\nOutput:\n{output}"
+        );
+        let missing_directory_reason =
+            std::io::Error::from_raw_os_error(nix::libc::ENOENT).to_string();
+        assert!(
+            output.contains(&missing_directory_reason),
+            "{merge_mode} failure should report the filesystem reason.\nOutput:\n{output}"
+        );
 
         let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
         for original in commits_before.lines() {
@@ -974,6 +984,15 @@ fn test_jj_rebase_cleanup_preserves_merge_candidate_parents() {
         output.contains("Failed to create work directory"),
         "Check should fail while allocating a workdir.\nOutput:\n{output}"
     );
+    assert!(
+        output.contains(&missing_tmpdir.display().to_string()),
+        "Check failure should report the attempted workdir location.\nOutput:\n{output}"
+    );
+    let missing_directory_reason = std::io::Error::from_raw_os_error(nix::libc::ENOENT).to_string();
+    assert!(
+        output.contains(&missing_directory_reason),
+        "Check failure should report the filesystem reason.\nOutput:\n{output}"
+    );
 
     let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
     for original in commits_before.lines() {
@@ -993,13 +1012,22 @@ fn test_jj_mq_cleanup_after_workdir_creation_failure() {
     let repo_path = repo.path();
     let test_home = repo_path.join(".test_home");
     let missing_tmpdir = repo_path.join("missing-tmpdir");
+    let runtime_dir = repo_path.join("runtime");
     let feature_commit = fs::read_to_string(repo_path.join(".feature_commit")).unwrap();
     let commits_before = jj_non_working_copy_commits(repo_path, &test_home);
 
+    cmd!(selfci_bin(), "mq", "start")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .env("TMPDIR", &missing_tmpdir)
+        .run()
+        .expect("Failed to start selfci mq");
     let stop_guard = scopeguard::guard((), |_| {
         let _ = cmd!(selfci_bin(), "mq", "stop")
             .dir(repo_path)
             .env("HOME", &test_home)
+            .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
             .run();
     });
     let output = cmd!(
@@ -1014,19 +1042,35 @@ fn test_jj_mq_cleanup_after_workdir_creation_failure() {
     .env("HOME", &test_home)
     .env("JJ_USER", "Test User")
     .env("JJ_EMAIL", "test@example.com")
+    .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
     .env("TMPDIR", &missing_tmpdir)
     .stderr_to_stdout()
     .unchecked()
     .read()
     .expect("Failed to run selfci mq");
-    // Stop before inspecting the repo to prove cleanup finishes before MQ
-    // publishes completion; a caller-owned end-of-loop guard loses this race.
-    drop(stop_guard);
-
     assert!(
         output.contains("Failed: check"),
         "MQ check should fail while allocating a workdir.\nOutput:\n{output}"
     );
+    let status_output = cmd!(selfci_bin(), "mq", "status", "1")
+        .dir(repo_path)
+        .env("HOME", &test_home)
+        .env("SELFCI_MQ_RUNTIME_DIR", &runtime_dir)
+        .stderr_to_stdout()
+        .read()
+        .expect("Failed to query failed selfci mq run");
+    let missing_directory_reason = std::io::Error::from_raw_os_error(nix::libc::ENOENT).to_string();
+    assert!(
+        status_output.contains(&missing_tmpdir.display().to_string()),
+        "MQ status should report the attempted workdir location.\nOutput:\n{status_output}"
+    );
+    assert!(
+        status_output.contains(&missing_directory_reason),
+        "MQ status should report the complete filesystem reason.\nOutput:\n{status_output}"
+    );
+    // Stop before inspecting the repo to prove cleanup finishes before MQ
+    // publishes completion; a caller-owned end-of-loop guard loses this race.
+    drop(stop_guard);
 
     let commits_after = jj_non_working_copy_commits(repo_path, &test_home);
     for original in commits_before.lines() {

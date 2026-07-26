@@ -1,5 +1,5 @@
 use super::{
-    FORCE_JJ_POST_MOVE_VERIFY_FAILURE, PublicationOutcome, create_test_merge,
+    FORCE_JJ_POST_MOVE_VERIFY_FAILURE, PublicationOutcome, create_test_merge, daemonize_foreground,
     ensure_private_runtime_directory, publish_prepared_candidate,
 };
 use duct::cmd;
@@ -82,7 +82,11 @@ fn rejects_symlink_runtime_directory() {
     std::fs::create_dir(&target).unwrap();
     symlink(target, &path).unwrap();
 
-    assert!(ensure_private_runtime_directory(&path, nix::unistd::getuid().as_raw()).is_err());
+    let error = ensure_private_runtime_directory(&path, nix::unistd::getuid().as_raw())
+        .expect_err("insecure runtime directory should be rejected");
+    let message = error.to_string();
+    assert!(message.contains(&path.display().to_string()), "{message}");
+    assert!(message.contains("mode 0700"), "{message}");
 }
 
 #[test]
@@ -106,6 +110,28 @@ fn rejects_foreign_runtime_directory_owner() {
     let foreign_uid = std::fs::metadata(&path).unwrap().uid().wrapping_add(1);
 
     assert!(ensure_private_runtime_directory(&path, foreign_uid).is_err());
+}
+
+#[test]
+fn foreground_daemon_reports_failed_runtime_path_and_reason() {
+    let parent = tempfile::tempdir().unwrap();
+    let blocking_file = parent.path().join("file");
+    std::fs::write(&blocking_file, b"not a directory").unwrap();
+    let runtime_dir = blocking_file.join("runtime");
+
+    let error = match daemonize_foreground(parent.path(), Some(runtime_dir.clone()), "main") {
+        Ok(_) => panic!("runtime below a file should fail"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains(&runtime_dir.display().to_string()),
+        "{message}"
+    );
+    assert!(
+        message.contains(&std::io::Error::from_raw_os_error(nix::libc::ENOTDIR).to_string()),
+        "{message}"
+    );
 }
 
 fn git_landing_race(merge_mode: MergeMode) {

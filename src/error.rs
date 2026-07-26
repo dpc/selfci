@@ -1,4 +1,5 @@
 use error_set::error_set;
+use std::path::PathBuf;
 
 /// A simple error type that wraps a string message
 /// Used for command output errors where we want to capture and display the output
@@ -41,6 +42,39 @@ impl std::error::Error for ProcessControlError {
     }
 }
 
+/// A failure to allocate a disposable candidate-check work directory.
+#[derive(Debug)]
+pub struct WorkDirectoryCreateError {
+    /// Parent directory in which SelfCI attempted the allocation.
+    path: PathBuf,
+    /// Underlying filesystem error.
+    source: std::io::Error,
+}
+
+impl WorkDirectoryCreateError {
+    /// Create an error that retains the attempted location and filesystem reason.
+    pub fn new(path: PathBuf, source: std::io::Error) -> Self {
+        Self { path, source }
+    }
+}
+
+impl std::fmt::Display for WorkDirectoryCreateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Failed to create work directory in {}: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for WorkDirectoryCreateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 error_set! {
     VCSError := {
         #[display("No supported VCS found (looking for .jj or .git directory)")]
@@ -50,8 +84,10 @@ error_set! {
     }
 
     WorkDirError := {
-        #[display("Failed to create work directory")]
+        #[display("Failed to create work directory: {0}")]
         CreateFailed(std::io::Error),
+        #[display("{0}")]
+        CreateWorkDirectoryFailed(WorkDirectoryCreateError),
     }
 
     VCSOperationError := {
@@ -116,7 +152,9 @@ impl MainError {
         match self {
             MainError::NoVCSFound => crate::exit_codes::EXIT_NO_VCS_FOUND,
             MainError::InvalidVCSType => crate::exit_codes::EXIT_INVALID_VCS_TYPE,
-            MainError::CreateFailed(_) => crate::exit_codes::EXIT_WORKDIR_CREATE_FAILED,
+            MainError::CreateFailed(_) | MainError::CreateWorkDirectoryFailed(_) => {
+                crate::exit_codes::EXIT_WORKDIR_CREATE_FAILED
+            }
             MainError::CommandFailed(_) => crate::exit_codes::EXIT_VCS_COMMAND_FAILED,
             MainError::NotInitialized => crate::exit_codes::EXIT_NOT_INITIALIZED,
             MainError::ReadFailed(_) => crate::exit_codes::EXIT_CONFIG_READ_FAILED,

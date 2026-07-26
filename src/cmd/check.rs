@@ -1,7 +1,7 @@
 use duct::cmd;
 use selfci::{
-    CheckError, MainError, WorkDirError, config::CommandConfig, copy_revisions_to_workdirs,
-    get_vcs, protocol, read_config, revision::ResolvedRevision,
+    CheckError, MainError, WorkDirError, WorkDirectoryCreateError, config::CommandConfig,
+    copy_revisions_to_workdirs, get_vcs, protocol, read_config, revision::ResolvedRevision,
 };
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -14,10 +14,13 @@ use tracing::{debug, info};
 
 /// Create a temporary directory with "selfci-" prefix for easier identification
 fn create_selfci_tempdir() -> Result<tempfile::TempDir, WorkDirError> {
+    let temp_root = std::env::temp_dir();
     tempfile::Builder::new()
         .prefix("selfci-")
-        .tempdir()
-        .map_err(WorkDirError::CreateFailed)
+        .tempdir_in(&temp_root)
+        .map_err(|error| {
+            WorkDirError::CreateWorkDirectoryFailed(WorkDirectoryCreateError::new(temp_root, error))
+        })
 }
 
 /// Mode for running a check - determines output behavior and result handling

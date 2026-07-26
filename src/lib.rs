@@ -17,7 +17,7 @@ use std::path::Path;
 pub use config::{CloneMode, InitResult, SelfCIConfig, init_config, read_config};
 pub use error::{
     CheckError, CommandOutputError, ConfigError, MQError, MainError, MergeError,
-    ProcessControlError, VCSError, VCSOperationError, WorkDirError,
+    ProcessControlError, VCSError, VCSOperationError, WorkDirError, WorkDirectoryCreateError,
 };
 
 #[derive(Debug, Clone, Copy)]

@@ -56,7 +56,12 @@ fn ensure_private_runtime_directory(path: &Path, uid: u32) -> Result<(), MainErr
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(WorkDirError::CreateFailed(error).into()),
+        Err(error) => {
+            return Err(WorkDirError::CreateWorkDirectoryFailed(
+                selfci::WorkDirectoryCreateError::new(path.to_path_buf(), error),
+            )
+            .into());
+        }
     }
 
     let metadata = std::fs::symlink_metadata(path).map_err(WorkDirError::CreateFailed)?;
@@ -476,13 +481,11 @@ fn daemonize_background(
     };
 
     // Create directory BEFORE forking
-    std::fs::create_dir_all(&daemon_dir).map_err(|e| {
-        eprintln!(
-            "ERROR: Failed to create daemon directory {}: {}",
-            daemon_dir.display(),
-            e
-        );
-        WorkDirError::CreateFailed(e)
+    std::fs::create_dir_all(&daemon_dir).map_err(|error| {
+        WorkDirError::CreateWorkDirectoryFailed(selfci::WorkDirectoryCreateError::new(
+            daemon_dir.clone(),
+            error,
+        ))
     })?;
 
     // Bind socket BEFORE writing mq.dir - this ensures that finding mq.dir
@@ -600,7 +603,12 @@ fn daemonize_foreground(
         None => get_daemon_dir_for_pid(pid)?,
     };
 
-    std::fs::create_dir_all(&daemon_dir).map_err(WorkDirError::CreateFailed)?;
+    std::fs::create_dir_all(&daemon_dir).map_err(|error| {
+        WorkDirError::CreateWorkDirectoryFailed(selfci::WorkDirectoryCreateError::new(
+            daemon_dir.clone(),
+            error,
+        ))
+    })?;
 
     // Bind socket BEFORE writing mq.dir - finding mq.dir guarantees socket is ready
     let socket_path = daemon_dir.join(constants::MQ_SOCK_FILENAME);
